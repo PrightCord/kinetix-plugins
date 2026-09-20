@@ -33,16 +33,16 @@
       "publisher": "Kinetix",
       "official": true,
       "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/claude-code-oauth",
-      "latest_version": "0.1.1",
-      "artifact_name": "dev.kinetix.claude-code-oauth-0.1.1.kxp",
+      "latest_version": "0.1.2",
+      "artifact_name": "dev.kinetix.claude-code-oauth-0.1.2.kxp",
       "capabilities": [
         "credential_strategy",
         "auth_flow"
       ],
       "installable": true,
       "distribution": {
-        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/claude-code-oauth-v0.1.1/dev.kinetix.claude-code-oauth-0.1.1.kxp",
-        "sha256": "6be29ae5ce794cd1069dc2f87645bdd76fff3eb7fe3b863897d1d69873158bdb",
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/claude-code-oauth-v0.1.2/dev.kinetix.claude-code-oauth-0.1.2.kxp",
+        "sha256": "7c4ae8fdf514f63c185eda0030cc8906e65c0f5dad1a0ed3b6828e404f6209fa",
         "publisher_key_id": "kinetix-official-v1",
         "allowed_hosts": [
           "github.com",
