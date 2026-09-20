@@ -25,7 +25,7 @@ auth_flow = "antigravity"
 model_source = "antigravity-models"
 
 [integrations.provider]
-base_url = "https://autopush-alkalimakersuite-pa.sandbox.googleapis.com"
+base_url = "https://daily-cloudcode-pa.googleapis.com"
 wire_format = "plugin"
 auth_scheme = "bearer"
 timeout_ms = 120000
