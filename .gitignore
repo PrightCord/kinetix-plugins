@@ -1,4 +1,6 @@
 /target/
+/dist/
 *.kxp
+/plugins/*/*.wasm
 plugin.wasm
 .DS_Store
