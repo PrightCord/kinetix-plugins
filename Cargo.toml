@@ -1,6 +1,6 @@
 # Standalone workspace for the Kinetix plugin SDK and first-party plugins.
 [workspace]
-members = ["sdk", "plugins/antigravity-oauth", "plugins/claude-code-oauth"]
+members = ["sdk", "plugins/antigravity-oauth", "plugins/claude-code-oauth", "plugins/opencode-free"]
 resolver = "2"
 
 [profile.release]
