@@ -1,4 +1,12 @@
 {
   "schema_version": 1,
-  "publishers": []
+  "publishers": [
+    {
+      "id": "kinetix-official-v1",
+      "publisher": "Kinetix",
+      "algorithm": "ed25519",
+      "public_key_base64": "P9pv9yk80bJIPLkbZbMLYCWswBfBuLyUGQ+UPYHw5Uw=",
+      "enabled": true
+    }
+  ]
 }

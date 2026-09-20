@@ -130,12 +130,12 @@ fi
 
 NOTES="$OUT/RELEASE_NOTES.md"
 cat > "$NOTES" <<EOF
-Official Kinetix plugin release for **$NAME** (`$PLUGIN_ID`) v$VERSION.
+Official Kinetix plugin release for **$NAME** (\`$PLUGIN_ID\`) v$VERSION.
 
 Artifacts:
-- `$PLUGIN_ID-$VERSION.kxp` — signed installable Kinetix package.
-- `$PLUGIN_ID-$VERSION.wasm` — standalone WebAssembly Component.
-- `SHA256SUMS` — SHA-256 hashes for both artifacts.
+- \`$PLUGIN_ID-$VERSION.kxp\` — signed installable Kinetix package.
+- \`$PLUGIN_ID-$VERSION.wasm\` — standalone WebAssembly Component.
+- \`SHA256SUMS\` — SHA-256 hashes for both artifacts.
 EOF
 
 if gh release view "$TAG" --repo PrightCord/kinetix-plugins >/dev/null 2>&1; then
