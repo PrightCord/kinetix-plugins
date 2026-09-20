@@ -4,23 +4,33 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Check plugin workspace
         run: cargo check --locked --workspace --target wasm32-unknown-unknown
+
       - name: Validate catalog JSON
         run: |
           python3 -m json.tool catalog.json >/dev/null
           python3 -m json.tool trusted-publishers.json >/dev/null
+
       - name: Validate plugin manifests
         run: |
           python3 - <<'PY'
@@ -35,3 +45,25 @@ jobs:
               assert data["manifest_version"] == 1
           print(f"validated {len(manifests)} plugin manifest(s)")
           PY
+
+      - name: Install wasm-tools
+        run: cargo install wasm-tools --version 1.259.0 --locked
+
+      - name: Build all plugin artifacts
+        run: bash scripts/build-all.sh --out-dir dist
+
+      - name: Generate CI checksums
+        run: |
+          cd dist
+          sha256sum *.kxp *.wasm > SHA256SUMS
+
+      - name: Upload plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinetix-plugin-artifacts
+          path: |
+            dist/*.kxp
+            dist/*.wasm
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

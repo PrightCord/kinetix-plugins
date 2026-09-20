@@ -44,18 +44,18 @@ const ANTIGRAVITY_SCOPES: &[&str] = &[
 /// so static scanners do not mistake public desktop-app credentials for server secrets).
 fn default_client_id() -> String {
     let bytes: &[u8] = &[
-        49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115, 115, 105,
-        110, 50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111, 108, 111, 106,
-        104, 52, 103, 52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46, 103, 111, 111, 103,
-        108, 101, 117, 115, 101, 114, 99, 111, 110, 116, 101, 110, 116, 46, 99, 111, 109,
+        49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115, 115, 105, 110,
+        50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111, 108, 111, 106, 104, 52, 103,
+        52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46, 103, 111, 111, 103, 108, 101, 117, 115,
+        101, 114, 99, 111, 110, 116, 101, 110, 116, 46, 99, 111, 109,
     ];
     String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn default_client_secret() -> String {
     let bytes: &[u8] = &[
-        71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74,
-        49, 109, 76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
+        71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74, 49, 109,
+        76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
     ];
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -217,10 +217,7 @@ fn refresh(cred: &mut Credential) -> Result<(), String> {
     }
     let text = String::from_utf8(resp.body).map_err(|_| "token response not utf-8".to_string())?;
     if resp.status != 200 {
-        return Err(format!(
-            "token endpoint returned HTTP {}",
-            resp.status
-        ));
+        return Err(format!("token endpoint returned HTTP {}", resp.status));
     }
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("invalid token JSON: {e}"))?;
@@ -400,9 +397,7 @@ impl auth_world::exports::auth_flow::Guest for Component {
             url.push_str(&urlencode(&challenge));
             url.push_str("&code_challenge_method=S256");
         }
-        if let Some(bytes) =
-            auth_world::kinetix::plugin::host_storage::get("_config:login_hint")
-        {
+        if let Some(bytes) = auth_world::kinetix::plugin::host_storage::get("_config:login_hint") {
             if let Ok(hint) = String::from_utf8(bytes) {
                 let hint = hint.trim();
                 if !hint.is_empty() {
@@ -466,9 +461,8 @@ impl auth_world::exports::auth_flow::Guest for Component {
             ));
         }
 
-        let tokens: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            auth_error("protocol_error", format!("invalid token JSON: {e}"), false)
-        })?;
+        let tokens: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| auth_error("protocol_error", format!("invalid token JSON: {e}"), false))?;
         let access_token = tokens
             .get("access_token")
             .and_then(|value| value.as_str())
@@ -497,9 +491,8 @@ impl auth_world::exports::auth_flow::Guest for Component {
             .get("expires_in")
             .and_then(|value| value.as_u64())
             .unwrap_or(3600);
-        let expiry = format_rfc3339_ms(
-            kinetix_plugin_sdk::helpers::now_unix_millis() + expires_in * 1000,
-        );
+        let expiry =
+            format_rfc3339_ms(kinetix_plugin_sdk::helpers::now_unix_millis() + expires_in * 1000);
 
         let mut email: Option<String> = None;
         let mut metadata: Option<String> = None;
@@ -627,7 +620,13 @@ fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginErro
         .get("access_token")
         .and_then(|item| item.as_str())
         .filter(|item| !item.is_empty())
-        .ok_or_else(|| model_error("protocol_error", "token response missing access_token", false))?;
+        .ok_or_else(|| {
+            model_error(
+                "protocol_error",
+                "token response missing access_token",
+                false,
+            )
+        })?;
     cred.access_token = Some(access_token.to_string());
     if let Some(refresh_token) = value
         .get("refresh_token")
