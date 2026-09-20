@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.claude-code-oauth"
 name = "Claude Code OAuth"
-version = "0.1.0"
+version = "0.1.1"
 plugin_api = "1"
 
 [provides]
@@ -34,7 +34,7 @@ integration = "claude-code"
 description = "Sign in to Anthropic with Claude Code OAuth and add the subscription as a provider account."
 
 [permissions]
-network_hosts = ["api.anthropic.com"]
+network_hosts = ["api.anthropic.com", "claude.ai"]
 credential_scopes = ["credential_strategy:claude-code-oauth"]
 credential_read = true
 
