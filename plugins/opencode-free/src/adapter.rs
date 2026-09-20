@@ -295,11 +295,7 @@ fn get_header<'a>(headers: &'a Value, name: &str) -> Option<&'a str> {
     })
 }
 
-pub fn classify_error(
-    status: u16,
-    body: &str,
-    headers_json: &str,
-) -> Result<String, AdapterError> {
+pub fn classify_error(status: u16, body: &str, headers_json: &str) -> Result<String, AdapterError> {
     let headers: Value = serde_json::from_str(headers_json).unwrap_or(Value::Null);
     let message = serde_json::from_str::<Value>(body)
         .ok()
@@ -444,7 +440,9 @@ pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
         return Ok(Value::Array(parse_chat(&value)).to_string());
     }
 
-    if value.get("object").and_then(Value::as_str) == Some("response") || value.get("output").is_some() {
+    if value.get("object").and_then(Value::as_str) == Some("response")
+        || value.get("output").is_some()
+    {
         let mut events = Vec::new();
         if let Some(id) = value.get("id").and_then(Value::as_str) {
             events.push(json!({"type":"start","upstream_request_id":id}));
@@ -479,9 +477,12 @@ mod tests {
         assert!(build_url(provider, r#"{"upstream_id":"mimo-v2.5-free"}"#)
             .unwrap()
             .ends_with("/zen/v1/chat/completions"));
-        assert!(build_url(provider, r#"{"upstream_id":"muse-spark-1.3-contributor-free"}"#)
-            .unwrap()
-            .ends_with("/zen/v1/responses"));
+        assert!(build_url(
+            provider,
+            r#"{"upstream_id":"muse-spark-1.3-contributor-free"}"#
+        )
+        .unwrap()
+        .ends_with("/zen/v1/responses"));
     }
 
     #[test]
