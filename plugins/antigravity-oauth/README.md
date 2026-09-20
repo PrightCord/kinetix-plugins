@@ -20,7 +20,7 @@ provider.wire_plugin       = "plugin:dev.kinetix.antigravity-oauth/antigravity"
 
 The manifest requests:
 
-- outbound HTTP to `accounts.google.com`, `oauth2.googleapis.com`, `www.googleapis.com`, and `daily-cloudcode-pa.sandbox.googleapis.com`;
+- outbound HTTP to `accounts.google.com`, `oauth2.googleapis.com`, `www.googleapis.com`, and `daily-cloudcode-pa.googleapis.com`;
 - credential scope `credential_strategy:antigravity-oauth`;
 - plaintext credential read for OAuth refresh-token exchange.
 
