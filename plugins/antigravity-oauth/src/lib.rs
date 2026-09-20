@@ -989,4 +989,3 @@ mod tests {
         assert!(parse_model_catalog(&val).is_empty());
     }
 }
-
