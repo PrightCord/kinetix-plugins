@@ -25,6 +25,30 @@
           "objects.githubusercontent.com"
         ]
       }
+    },
+    {
+      "id": "dev.kinetix.claude-code-oauth",
+      "name": "Claude Code OAuth",
+      "description": "Anthropic Claude Code OAuth credential strategy and auth flow.",
+      "publisher": "Kinetix",
+      "official": true,
+      "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/claude-code-oauth",
+      "latest_version": "0.1.0",
+      "artifact_name": "dev.kinetix.claude-code-oauth-0.1.0.kxp",
+      "capabilities": [
+        "credential_strategy",
+        "auth_flow"
+      ],
+      "installable": true,
+      "distribution": {
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/claude-code-oauth-v0.1.0/dev.kinetix.claude-code-oauth-0.1.0.kxp",
+        "sha256": "06829dd4ee406f10a17c3dbf5bbf0c4c0c88fc24c327ee86331abb4e412fa6a0",
+        "publisher_key_id": "kinetix-official-v1",
+        "allowed_hosts": [
+          "github.com",
+          "objects.githubusercontent.com"
+        ]
+      }
     }
   ]
 }
