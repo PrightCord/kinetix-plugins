@@ -126,18 +126,10 @@ fn parse_model_list(value: &Value) -> Vec<DiscoveredModel> {
 
 impl exports::model_source::Guest for Component {
     fn discover(
-        provider_id: String,
+        _provider_id: String,
         base_url: String,
         models_path: String,
     ) -> Result<Vec<DiscoveredModel>, PluginError> {
-        if provider_id != "opencode-free" && provider_id != "opencode" {
-            return Err(discovery_error(
-                "invalid_configuration",
-                format!("unsupported provider id '{provider_id}'"),
-                false,
-            ));
-        }
-
         let url = join_url(&base_url, &models_path);
         let req = HttpRequest {
             method: "GET".into(),
