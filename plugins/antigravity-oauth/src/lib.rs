@@ -556,7 +556,7 @@ type ModelCredentialRef = model_world::kinetix::plugin::types::CredentialRef;
 type ModelDiscoveredModel = model_world::kinetix::plugin::types::DiscoveredModel;
 
 const MODEL_CATALOG_URL: &str =
-    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const ANTIGRAVITY_IDE_VERSION: &str = "2.11.0";
 
 fn model_error(code: &str, message: impl Into<String>, retryable: bool) -> ModelPluginError {
