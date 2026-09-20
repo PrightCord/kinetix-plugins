@@ -92,9 +92,15 @@ fn request_model(req: &Value, model: &Value) -> String {
 }
 
 fn ensure_required_chat_tools(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else { return };
-    let tools = obj.entry("tools").or_insert_with(|| Value::Array(Vec::new()));
-    let Some(arr) = tools.as_array_mut() else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let tools = obj
+        .entry("tools")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
 
     for name in ["bash", "read"] {
         let present = arr.iter().any(|tool| {
@@ -116,9 +122,15 @@ fn ensure_required_chat_tools(body: &mut Value) {
 }
 
 fn ensure_required_responses_tools(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else { return };
-    let tools = obj.entry("tools").or_insert_with(|| Value::Array(Vec::new()));
-    let Some(arr) = tools.as_array_mut() else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let tools = obj
+        .entry("tools")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(arr) = tools.as_array_mut() else {
+        return;
+    };
 
     for name in ["bash", "read"] {
         let present = arr
