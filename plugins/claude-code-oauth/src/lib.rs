@@ -303,15 +303,6 @@ fn url_encode(value: &str) -> String {
     out
 }
 
-fn pending_state_key(redirect_uri: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in redirect_uri.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("oauth-state:{h:016x}")
-}
-
 impl auth_world::exports::auth_flow::Guest for Component {
     fn begin(
         flow_name: String,
@@ -327,12 +318,6 @@ impl auth_world::exports::auth_flow::Guest for Component {
                 false,
             )
         })?;
-
-        auth_world::kinetix::plugin::host_storage::put(
-            &pending_state_key(&redirect_uri),
-            state.as_bytes(),
-        )
-        .map_err(|e| auth_error("plugin_internal", e, false))?;
 
         Ok(format!(
             "{AUTHORIZE_URL}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
@@ -364,10 +349,7 @@ impl auth_world::exports::auth_flow::Guest for Component {
             .map(|(c, s)| (c.to_string(), Some(s.to_string())))
             .unwrap_or((code, None));
 
-        let state_key = pending_state_key(&redirect_uri);
-        let stored_state = auth_world::kinetix::plugin::host_storage::get(&state_key)
-            .and_then(|bytes| String::from_utf8(bytes).ok());
-        let state = inline_state.or(stored_state).ok_or_else(|| {
+        let state = inline_state.ok_or_else(|| {
             auth_error(
                 "invalid_configuration",
                 "missing OAuth state for Claude token exchange",
