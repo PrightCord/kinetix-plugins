@@ -1,0 +1,4 @@
+/target/
+*.kxp
+plugin.wasm
+.DS_Store
