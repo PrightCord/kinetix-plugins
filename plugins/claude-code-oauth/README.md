@@ -40,4 +40,4 @@ The plugin requires outbound access to:
 bash scripts/build-plugin.sh plugins/claude-code-oauth
 ```
 
-The resulting package is `dev.kinetix.claude-code-oauth-0.1.1.kxp`.
+The resulting package is `dev.kinetix.claude-code-oauth-0.1.2.kxp`.
