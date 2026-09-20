@@ -84,6 +84,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinetix-plugin-opencode-free"
+version = "0.1.0"
+dependencies = [
+ "kinetix-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "kinetix-plugin-sdk"
 version = "0.1.0"
 dependencies = [
