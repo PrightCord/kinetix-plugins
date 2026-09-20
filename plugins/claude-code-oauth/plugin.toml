@@ -1,0 +1,46 @@
+manifest_version = 1
+id = "dev.kinetix.claude-code-oauth"
+name = "Claude Code OAuth"
+version = "0.1.0"
+plugin_api = "1"
+
+[provides]
+credential_strategies = ["claude-code-oauth"]
+auth_flows = ["claude-code"]
+
+[[integrations]]
+id = "claude-code"
+name = "Claude Code OAuth"
+description = "Connect an Anthropic Claude Code subscription using the Claude OAuth PKCE flow."
+credential_strategy = "claude-code-oauth"
+auth_flow = "claude-code"
+
+[integrations.provider]
+base_url = "https://api.anthropic.com"
+wire_format = "anthropic"
+auth_scheme = "bearer"
+timeout_ms = 600000
+capability_mode = "permissive"
+follow_redirects = false
+
+[integrations.provider.extra_headers]
+anthropic-beta = "oauth-2025-04-20"
+
+[[ui.actions]]
+id = "connect-account"
+label = "Connect Claude Code"
+kind = "auth"
+integration = "claude-code"
+description = "Sign in to Anthropic with Claude Code OAuth and add the subscription as a provider account."
+
+[permissions]
+network_hosts = ["api.anthropic.com"]
+credential_scopes = ["credential_strategy:claude-code-oauth"]
+credential_read = true
+
+[limits]
+memory = "32MiB"
+wall_time_ms = 10000
+max_outbound_requests = 1
+max_http_body = "512KiB"
+storage = "1MiB"
