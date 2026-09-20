@@ -75,6 +75,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinetix-plugin-claude-code-oauth"
+version = "0.1.0"
+dependencies = [
+ "kinetix-plugin-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kinetix-plugin-sdk"
 version = "0.1.0"
 dependencies = [

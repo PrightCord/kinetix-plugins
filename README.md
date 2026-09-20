@@ -31,14 +31,14 @@ Build one plugin:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-bash scripts/build-plugin.sh plugins/antigravity-oauth
+bash scripts/build-plugin.sh plugins/claude-code-oauth
 ```
 
 That produces two versioned artifacts beside the plugin source:
 
 ```text
-dev.kinetix.antigravity-oauth-0.1.0.kxp
-dev.kinetix.antigravity-oauth-0.1.0.wasm
+dev.kinetix.claude-code-oauth-0.1.0.kxp
+dev.kinetix.claude-code-oauth-0.1.0.wasm
 ```
 
 The `.kxp` is the canonical installable Kinetix package. The `.wasm` file is the standalone WebAssembly Component binary contained by that package.
@@ -63,13 +63,13 @@ Dry-run the full build/sign/validation path first:
 
 ```sh
 export KINETIX_PLUGIN_SIGNING_KEY_FILE=~/.config/kinetix/plugin-signing.pem
-bash scripts/release-plugin.sh antigravity-oauth
+bash scripts/release-plugin.sh claude-code-oauth
 ```
 
 Publish after the dry run succeeds:
 
 ```sh
-bash scripts/release-plugin.sh antigravity-oauth --publish
+bash scripts/release-plugin.sh claude-code-oauth --publish
 ```
 
 The local release script requires an authenticated `gh` CLI for publishing. It builds from a clean detached source worktree, signs the package locally, validates the WebAssembly component, generates `SHA256SUMS`, creates/pushes the annotated tag, and uploads immutable release assets:
@@ -85,6 +85,7 @@ A release does **not** automatically make a catalog entry installable. After the
 ## Current plugins
 
 - **Google Antigravity** (`dev.kinetix.antigravity-oauth`) — OAuth credential strategy, account model discovery, and `v1internal` provider adapter.
+- **Claude Code OAuth** (`dev.kinetix.claude-code-oauth`) — Anthropic Claude Code PKCE OAuth, token exchange, and refresh-token rotation.
 
 ## Compatibility
 
