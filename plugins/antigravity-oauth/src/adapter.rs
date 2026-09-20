@@ -413,6 +413,8 @@ pub fn classify_error(status: u16, body: &str, headers_json: &str) -> Result<Str
         "quota_exhausted"
     } else if status == 401 || status == 403 {
         "auth_error"
+    } else if (300..=399).contains(&status) {
+        "unexpected_redirect"
     } else if status >= 500 {
         // Any 5xx is a server error; transient ones (high traffic, capacity,
         // stream ended) are annotated so the host's trace explains a retry.
@@ -426,27 +428,65 @@ pub fn classify_error(status: u16, body: &str, headers_json: &str) -> Result<Str
         "server_error"
     };
 
-    let evidence = json!({
+    let location = get_header(&headers, "location").map(str::to_string);
+    if (300..=399).contains(&status) {
+        if let Some(ref loc) = location {
+            if message == format!("upstream HTTP {status}") {
+                message = format!("unexpected upstream redirect ({status}) to {loc}");
+            } else {
+                message = format!("unexpected upstream redirect ({status}) to {loc}: {message}");
+            }
+        } else if message == format!("upstream HTTP {status}") {
+            message = format!("unexpected upstream redirect ({status})");
+        }
+    }
+
+    let mut evidence = json!({
         "kind": kind,
         "status": status,
         "retry_after_secs": retry_after,
         "message": message,
         "quota_reset_at": Value::Null,
     });
+    if let Some(ref loc) = location {
+        evidence["location"] = json!(loc);
+    } else if (300..=399).contains(&status) {
+        evidence["location"] = Value::Null;
+    }
     Ok(evidence.to_string())
+}
+
+fn get_header<'a>(headers: &'a Value, name: &str) -> Option<&'a str> {
+    if let Some(obj) = headers.as_object() {
+        for (k, v) in obj {
+            if k.eq_ignore_ascii_case(name) {
+                return v.as_str();
+            }
+        }
+    } else if let Some(arr) = headers.as_array() {
+        for item in arr {
+            if let Some(pair) = item.as_array() {
+                if pair.len() == 2 {
+                    if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                        if k.eq_ignore_ascii_case(name) {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Retry-after seconds from headers or a "reset after 2h7m23s" message.
 fn parse_retry_after(headers: &Value, body: &str) -> Option<u64> {
-    if let Some(v) = headers.get("retry-after").and_then(|v| v.as_str()) {
+    if let Some(v) = get_header(headers, "retry-after") {
         if let Ok(secs) = v.trim().parse::<u64>() {
             return Some(secs);
         }
     }
-    if let Some(v) = headers
-        .get("x-ratelimit-reset-after")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(v) = get_header(headers, "x-ratelimit-reset-after") {
         if let Ok(secs) = v.trim().parse::<u64>() {
             return Some(secs);
         }
@@ -695,4 +735,121 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_url_uses_daily_endpoint_as_default_and_from_provider() {
+        // Fallback when empty or no base_url
+        let empty_url = build_url("{}", "{}").unwrap();
+        assert_eq!(
+            empty_url,
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+
+        // Integration provider setting
+        let provider = json!({
+            "base_url": "https://daily-cloudcode-pa.googleapis.com"
+        });
+        let url = build_url(&provider.to_string(), "{}").unwrap();
+        assert_eq!(
+            url,
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+
+        // Handles trailing slashes cleanly
+        let provider_slash = json!({
+            "base_url": "https://daily-cloudcode-pa.googleapis.com/"
+        });
+        let url_slash = build_url(&provider_slash.to_string(), "{}").unwrap();
+        assert_eq!(
+            url_slash,
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn classify_error_handles_redirects_with_and_without_location() {
+        // 302 with Location header (object shape)
+        let headers = json!({
+            "Location": "https://accounts.google.com/o/oauth2/v2/auth?client_id=..."
+        });
+        let evidence_json =
+            classify_error(302, "<html>Moved</html>", &headers.to_string()).unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "unexpected_redirect");
+        assert_eq!(evidence["status"], 302);
+        assert_eq!(
+            evidence["location"],
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=..."
+        );
+        assert!(evidence["message"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected upstream redirect (302) to https://accounts.google.com"));
+
+        // 301 without Location header
+        let evidence_json = classify_error(301, "", "{}").unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "unexpected_redirect");
+        assert_eq!(evidence["status"], 301);
+        assert!(evidence["location"].is_null());
+        assert_eq!(evidence["message"], "unexpected upstream redirect (301)");
+
+        // 307 with array-of-pairs headers
+        let headers_pairs = json!([
+            ["Content-Type", "text/html"],
+            [
+                "location",
+                "https://daily-cloudcode-pa.googleapis.com/redirected"
+            ]
+        ]);
+        let evidence_json = classify_error(307, "", &headers_pairs.to_string()).unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "unexpected_redirect");
+        assert_eq!(evidence["status"], 307);
+        assert_eq!(
+            evidence["location"],
+            "https://daily-cloudcode-pa.googleapis.com/redirected"
+        );
+    }
+
+    #[test]
+    fn classify_error_other_statuses() {
+        let headers = json!({ "retry-after": "30" });
+        let evidence_json =
+            classify_error(429, r#"{"error": "rate limited"}"#, &headers.to_string()).unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "quota_exhausted");
+        assert_eq!(evidence["retry_after_secs"], 30);
+        assert_eq!(evidence["message"], "rate limited");
+
+        let evidence_json = classify_error(401, "unauthorized", "{}").unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "auth_error");
+
+        let evidence_json = classify_error(500, "internal server error", "{}").unwrap();
+        let evidence: Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["kind"], "server_error");
+    }
+
+    #[test]
+    fn plugin_manifest_verifies_daily_endpoint_integration() {
+        let manifest = include_str!("../plugin.toml");
+        assert!(
+            manifest.contains("base_url = \"https://daily-cloudcode-pa.googleapis.com\""),
+            "plugin.toml must configure daily-cloudcode-pa.googleapis.com as the integration provider base_url"
+        );
+        assert!(
+            !manifest.contains("autopush-alkalimakersuite-pa"),
+            "plugin.toml must not contain the obsolete autopush endpoint"
+        );
+        assert!(
+            manifest.contains("\"daily-cloudcode-pa.googleapis.com\""),
+            "plugin.toml permissions must include daily-cloudcode-pa.googleapis.com"
+        );
+    }
 }
