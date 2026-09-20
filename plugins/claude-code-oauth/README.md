@@ -27,10 +27,17 @@ The implementation follows the Claude OAuth behavior used by
 - refresh begins four hours before expiry;
 - a newly returned refresh token replaces the previous one.
 
+## Network permissions
+
+The plugin requires outbound access to:
+
+- `claude.ai` for the browser authorization flow;
+- `api.anthropic.com` for token exchange, refresh, and Anthropic API requests.
+
 ## Build
 
 ```sh
 bash scripts/build-plugin.sh plugins/claude-code-oauth
 ```
 
-The resulting package is `dev.kinetix.claude-code-oauth-0.1.0.kxp`.
+The resulting package is `dev.kinetix.claude-code-oauth-0.1.1.kxp`.
