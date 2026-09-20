@@ -1,0 +1,12 @@
+[package]
+name = "kinetix-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SDK for Kinetix plugins (WIT bindings, host helpers, and export macro)."
+license = "MIT"
+repository = "https://github.com/PrightCord/kinetix-plugins"
+
+[dependencies]
+wit-bindgen = "0.62"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
