@@ -10,11 +10,7 @@ use kinetix_plugin_sdk::{export, exports, kinetix};
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
-const SCOPES: &[&str] = &[
-    "org:create_api_key",
-    "user:profile",
-    "user:inference",
-];
+const SCOPES: &[&str] = &["org:create_api_key", "user:profile", "user:inference"];
 
 /// 9router refreshes Claude credentials four hours before expiry.
 const REFRESH_LEAD_MS: u64 = 14_400_000;
@@ -69,7 +65,10 @@ fn load_credential(provider_id: &str, account_id: &str) -> Result<Credential, Pl
     let key = credential_state_key(provider_id, account_id);
     if let Some(raw) = kinetix_plugin_sdk::helpers::kv_get_string(&key) {
         if let Ok(saved) = serde_json::from_str::<Credential>(&raw) {
-            if saved.refresh_token.as_deref().is_some_and(|v| !v.is_empty())
+            if saved
+                .refresh_token
+                .as_deref()
+                .is_some_and(|v| !v.is_empty())
                 || saved.access_token.as_deref().is_some_and(|v| !v.is_empty())
             {
                 return Ok(saved);
@@ -79,7 +78,11 @@ fn load_credential(provider_id: &str, account_id: &str) -> Result<Credential, Pl
     credential_from_host(provider_id, account_id)
 }
 
-fn persist_credential(provider_id: &str, account_id: &str, cred: &Credential) -> Result<(), PluginError> {
+fn persist_credential(
+    provider_id: &str,
+    account_id: &str,
+    cred: &Credential,
+) -> Result<(), PluginError> {
     let raw = serde_json::to_string(cred).map_err(|e| {
         kinetix_plugin_sdk::helpers::error("plugin_internal", format!("encoding credential: {e}"))
     })?;
@@ -168,8 +171,9 @@ fn refresh(cred: &Credential) -> Result<Credential, PluginError> {
         credential: None,
     };
 
-    let resp = kinetix::plugin::host_http::send(&req)
-        .map_err(|e| kinetix_plugin_sdk::helpers::retryable_error(&e.code, e.message, e.retry_after))?;
+    let resp = kinetix::plugin::host_http::send(&req).map_err(|e| {
+        kinetix_plugin_sdk::helpers::retryable_error(&e.code, e.message, e.retry_after)
+    })?;
 
     if resp.body_truncated {
         return Err(kinetix_plugin_sdk::helpers::retryable_error(
@@ -180,7 +184,10 @@ fn refresh(cred: &Credential) -> Result<Credential, PluginError> {
     }
 
     let text = String::from_utf8(resp.body).map_err(|_| {
-        kinetix_plugin_sdk::helpers::error("protocol_error", "Claude OAuth token response is not UTF-8")
+        kinetix_plugin_sdk::helpers::error(
+            "protocol_error",
+            "Claude OAuth token response is not UTF-8",
+        )
     })?;
 
     if resp.status != 200 {
@@ -193,9 +200,8 @@ fn refresh(cred: &Credential) -> Result<Credential, PluginError> {
         });
     }
 
-    parse_token_response(&text, Some(refresh_token)).map_err(|e| {
-        kinetix_plugin_sdk::helpers::error("protocol_error", e)
-    })
+    parse_token_response(&text, Some(refresh_token))
+        .map_err(|e| kinetix_plugin_sdk::helpers::error("protocol_error", e))
 }
 
 impl exports::credential_strategy::Guest for Component {
@@ -314,9 +320,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
         pkce_challenge: Option<String>,
     ) -> Result<String, AuthPluginError> {
         require_flow(&flow_name)?;
-        let challenge = pkce_challenge
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| auth_error("invalid_configuration", "Claude Code OAuth requires PKCE", false))?;
+        let challenge = pkce_challenge.filter(|v| !v.is_empty()).ok_or_else(|| {
+            auth_error(
+                "invalid_configuration",
+                "Claude Code OAuth requires PKCE",
+                false,
+            )
+        })?;
 
         auth_world::kinetix::plugin::host_storage::put(
             &pending_state_key(&redirect_uri),
@@ -341,9 +351,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
         pkce_verifier: Option<String>,
     ) -> Result<AuthResult, AuthPluginError> {
         require_flow(&flow_name)?;
-        let verifier = pkce_verifier
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| auth_error("invalid_configuration", "Claude Code OAuth requires a PKCE verifier", false))?;
+        let verifier = pkce_verifier.filter(|v| !v.is_empty()).ok_or_else(|| {
+            auth_error(
+                "invalid_configuration",
+                "Claude Code OAuth requires a PKCE verifier",
+                false,
+            )
+        })?;
 
         let (auth_code, inline_state) = code
             .split_once('#')
@@ -353,9 +367,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
         let state_key = pending_state_key(&redirect_uri);
         let stored_state = auth_world::kinetix::plugin::host_storage::get(&state_key)
             .and_then(|bytes| String::from_utf8(bytes).ok());
-        let state = inline_state
-            .or(stored_state)
-            .ok_or_else(|| auth_error("invalid_configuration", "missing OAuth state for Claude token exchange", false))?;
+        let state = inline_state.or(stored_state).ok_or_else(|| {
+            auth_error(
+                "invalid_configuration",
+                "missing OAuth state for Claude token exchange",
+                false,
+            )
+        })?;
 
         let body = serde_json::json!({
             "code": auth_code,
@@ -389,8 +407,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
             ));
         }
 
-        let text = String::from_utf8(resp.body)
-            .map_err(|_| auth_error("protocol_error", "Claude OAuth token response is not UTF-8", false))?;
+        let text = String::from_utf8(resp.body).map_err(|_| {
+            auth_error(
+                "protocol_error",
+                "Claude OAuth token response is not UTF-8",
+                false,
+            )
+        })?;
 
         if resp.status != 200 {
             return Err(auth_error(
@@ -407,14 +430,26 @@ impl auth_world::exports::auth_flow::Guest for Component {
             .get("access_token")
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| auth_error("protocol_error", "token response missing access_token", false))?
+            .ok_or_else(|| {
+                auth_error(
+                    "protocol_error",
+                    "token response missing access_token",
+                    false,
+                )
+            })?
             .to_string();
 
         let refresh_token = value
             .get("refresh_token")
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| auth_error("credential_expired", "token response missing refresh_token", false))?
+            .ok_or_else(|| {
+                auth_error(
+                    "credential_expired",
+                    "token response missing refresh_token",
+                    false,
+                )
+            })?
             .to_string();
 
         let expires_in = value
@@ -439,8 +474,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
                 .map(str::to_string),
         };
 
-        let secret_json = serde_json::to_string(&credential)
-            .map_err(|e| auth_error("plugin_internal", format!("encoding credential: {e}"), false))?;
+        let secret_json = serde_json::to_string(&credential).map_err(|e| {
+            auth_error(
+                "plugin_internal",
+                format!("encoding credential: {e}"),
+                false,
+            )
+        })?;
 
         let metadata_json = serde_json::json!({
             "scope": credential.scope,
