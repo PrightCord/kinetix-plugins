@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.opencode-free"
 name = "OpenCode Free"
-version = "0.1.0"
+version = "0.1.1"
 plugin_api = "1"
 
 [provides]
@@ -18,7 +18,7 @@ model_source = "opencode-free-models"
 [integrations.provider]
 base_url = "https://opencode.ai"
 wire_format = "plugin"
-auth_scheme = "none"
+auth_scheme = "bearer"
 models_path = "/zen/v1/models"
 timeout_ms = 120000
 capability_mode = "permissive"
