@@ -895,3 +895,98 @@ impl adapter_world::exports::provider_adapter::Guest for Component {
 adapter_world::export!(Component with_types_in kinetix_plugin_sdk::adapter);
 
 export!(Component with_types_in kinetix_plugin_sdk);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fetch_available_models_object_shape() {
+        let json_str = r#"{
+            "models": {
+                "gemini-2.5-flash": {
+                    "displayName": "Gemini 2.5 Flash",
+                    "inputTokenLimit": 1048576,
+                    "outputTokenLimit": 65536,
+                    "capabilities": ["chat", "tools"]
+                },
+                "gemini-2.5-pro": {
+                    "name": "Gemini 2.5 Pro",
+                    "contextWindow": 2097152,
+                    "maxOutputTokens": 65536
+                },
+                "internal-experimental": {
+                    "displayName": "Internal Test Model",
+                    "isInternal": true
+                }
+            }
+        }"#;
+
+        let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let mut models = parse_model_catalog(&val);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+
+        assert_eq!(models.len(), 2);
+
+        assert_eq!(models[0].id, "gemini-2.5-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.5 Flash"));
+        assert_eq!(models[0].context_window, Some(1048576));
+        assert_eq!(models[0].max_output_tokens, Some(65536));
+        assert!(models[0].capabilities_json.is_some());
+
+        assert_eq!(models[1].id, "gemini-2.5-pro");
+        assert_eq!(models[1].display_name.as_deref(), Some("Gemini 2.5 Pro"));
+        assert_eq!(models[1].context_window, Some(2097152));
+        assert_eq!(models[1].max_output_tokens, Some(65536));
+    }
+
+    #[test]
+    fn parses_fetch_available_models_array_shape() {
+        let json_str = r#"{
+            "models": [
+                {
+                    "id": "gemini-3-flash",
+                    "displayName": "Gemini 3 Flash",
+                    "contextWindow": 1048576,
+                    "maxOutputTokens": 65536
+                },
+                {
+                    "model": "claude-sonnet-4-5",
+                    "name": "Claude Sonnet 4.5",
+                    "inputTokenLimit": 200000,
+                    "outputTokenLimit": 64000
+                },
+                {
+                    "id": "confidential-model",
+                    "isInternal": true
+                }
+            ]
+        }"#;
+
+        let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let models = parse_model_catalog(&val);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gemini-3-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3 Flash"));
+        assert_eq!(models[0].context_window, Some(1048576));
+
+        assert_eq!(models[1].id, "claude-sonnet-4-5");
+        assert_eq!(models[1].display_name.as_deref(), Some("Claude Sonnet 4.5"));
+        assert_eq!(models[1].context_window, Some(200000));
+        assert_eq!(models[1].max_output_tokens, Some(64000));
+    }
+
+    #[test]
+    fn handles_empty_or_missing_catalog() {
+        let val = serde_json::json!({});
+        assert!(parse_model_catalog(&val).is_empty());
+
+        let val = serde_json::json!({ "models": null });
+        assert!(parse_model_catalog(&val).is_empty());
+
+        let val = serde_json::json!({ "models": [] });
+        assert!(parse_model_catalog(&val).is_empty());
+    }
+}
+
