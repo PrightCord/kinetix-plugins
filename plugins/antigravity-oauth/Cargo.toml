@@ -1,6 +1,6 @@
 [package]
 name = "kinetix-plugin-antigravity-oauth"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Kinetix plugin: Antigravity (Google Cloud Code Assist) OAuth credential strategy."
 license = "MIT"
