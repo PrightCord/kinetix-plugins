@@ -470,8 +470,6 @@ impl auth_world::exports::auth_flow::Guest for Component {
         })
         .to_string();
 
-        let _ = auth_world::kinetix::plugin::host_storage::delete(&state_key);
-
         Ok(AuthResult {
             secret_json,
             account_label: Some("Claude Code".into()),
