@@ -55,7 +55,11 @@ fn join_url(base_url: &str, path: &str) -> String {
     } else {
         path.trim()
     };
-    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 fn is_free_model(id: &str) -> bool {
@@ -251,9 +255,7 @@ impl exports::hooks::Guest for Component {
 
 use kinetix_plugin_sdk::adapter as adapter_world;
 
-fn adapter_error(
-    e: adapter::AdapterError,
-) -> adapter_world::kinetix::plugin::types::PluginError {
+fn adapter_error(e: adapter::AdapterError) -> adapter_world::kinetix::plugin::types::PluginError {
     adapter_world::kinetix::plugin::types::PluginError {
         code: e.code,
         message: e.message,
@@ -368,9 +370,6 @@ mod tests {
             join_url("https://opencode.ai/", "/zen/v1/models"),
             "https://opencode.ai/zen/v1/models"
         );
-        assert_eq!(
-            join_url("", ""),
-            "https://opencode.ai/zen/v1/models"
-        );
+        assert_eq!(join_url("", ""), "https://opencode.ai/zen/v1/models");
     }
 }
