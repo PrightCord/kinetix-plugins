@@ -49,31 +49,36 @@ Build every first-party plugin into one output directory:
 bash scripts/build-all.sh --out-dir dist
 ```
 
-CI performs this full build on pushes and pull requests and uploads the unsigned `.kxp`, `.wasm`, and `SHA256SUMS` files as short-lived workflow artifacts.
+GitHub Actions is validation-only. Production plugin artifacts are built and published locally by maintainers.
 
 ## Releases
 
-Plugins are versioned and released independently. Release tags use:
+Plugins are released locally and independently. The release command derives the version from `plugin.toml` and uses a tag in the form:
 
 ```text
 <plugin-directory>-v<semver>
 ```
 
-For example:
+Dry-run the full build/sign/validation path first:
 
 ```sh
-git tag antigravity-oauth-v0.1.0
-git push origin antigravity-oauth-v0.1.0
+export KINETIX_PLUGIN_SIGNING_KEY_FILE=~/.config/kinetix/plugin-signing.pem
+bash scripts/release-plugin.sh antigravity-oauth
 ```
 
-The release workflow verifies that the tag version matches `plugin.toml`, rebuilds from the tagged source, requires the official Ed25519 signing key, and publishes:
+Publish after the dry run succeeds:
+
+```sh
+bash scripts/release-plugin.sh antigravity-oauth --publish
+```
+
+The local release script requires an authenticated `gh` CLI for publishing. It builds from a clean detached source worktree, signs the package locally, validates the WebAssembly component, generates `SHA256SUMS`, creates/pushes the annotated tag, and uploads immutable release assets:
 
 - `<plugin-id>-<version>.kxp` — signed installable package;
 - `<plugin-id>-<version>.wasm` — standalone component binary;
-- `SHA256SUMS` — hashes for both artifacts;
-- GitHub build-provenance attestations for the package and component.
+- `SHA256SUMS` — hashes for both artifacts.
 
-Official releases require the repository secret `KINETIX_PLUGIN_SIGNING_KEY_PEM`. Keep the corresponding public key in `trusted-publishers.json`; never commit the private key.
+The signing private key stays on the maintainer machine and never enters GitHub Actions.
 
 A release does **not** automatically make a catalog entry installable. After the signed release exists, update `catalog.json` with its exact distribution URL, SHA-256, publisher key id, and allowed hosts before setting `installable = true`.
 
