@@ -100,9 +100,7 @@ fn validate_redirect_uri(client: &OAuthClient, redirect_uri: &str) -> Result<(),
         );
     }
 
-    if client.custom
-        && !redirect_uri.starts_with("https://")
-        && !is_loopback_redirect(redirect_uri)
+    if client.custom && !redirect_uri.starts_with("https://") && !is_loopback_redirect(redirect_uri)
     {
         return Err(
             "custom Antigravity OAuth clients require an HTTPS or loopback redirect URI".into(),
@@ -426,10 +424,7 @@ fn auth_oauth_client() -> Result<OAuthClient, AuthPluginError> {
     .map_err(|message| auth_error("invalid_configuration", message, false))
 }
 
-fn validate_auth_redirect(
-    client: &OAuthClient,
-    redirect_uri: &str,
-) -> Result<(), AuthPluginError> {
+fn validate_auth_redirect(client: &OAuthClient, redirect_uri: &str) -> Result<(), AuthPluginError> {
     validate_redirect_uri(client, redirect_uri)
         .map_err(|message| auth_error("invalid_configuration", message, false))
 }
@@ -1020,8 +1015,7 @@ mod tests {
 
     #[test]
     fn custom_oauth_client_allows_https_or_loopback_redirect() {
-        let client =
-            select_oauth_client(Some("id".into()), Some("secret".into())).unwrap();
+        let client = select_oauth_client(Some("id".into()), Some("secret".into())).unwrap();
 
         assert!(validate_redirect_uri(
             &client,
