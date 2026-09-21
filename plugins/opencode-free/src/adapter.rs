@@ -59,10 +59,90 @@ pub fn build_url(provider_json: &str, model_json: &str) -> Result<String, Adapte
     }
 }
 
-pub fn apply_auth(_provider_json: &str, _credential: &str) -> Result<String, AdapterError> {
+const BASE62_CHARS: &[u8; 62] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+fn current_time_millis() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        kinetix_plugin_sdk::helpers::now_unix_millis()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn is_valid_session_id(s: &str) -> bool {
+    s.starts_with("ses_")
+        && s.len() == 30
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn extract_session_id(provider_json: &str, credential: &str) -> Option<String> {
+    let cred_trimmed = credential.trim();
+    if !cred_trimmed.is_empty() && cred_trimmed != "public" && is_valid_session_id(cred_trimmed) {
+        return Some(cred_trimmed.to_string());
+    }
+    if let Ok(provider) = serde_json::from_str::<Value>(provider_json) {
+        if let Some(sid) = provider
+            .get("session_id")
+            .or_else(|| provider.get("sessionId"))
+            .or_else(|| provider.get("x-opencode-session"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| is_valid_session_id(s))
+        {
+            return Some(sid.to_string());
+        }
+    }
+    None
+}
+
+/// Generates an OpenCode session identifier matching OpenCode's format:
+/// `ses_<12-hex-timestamp><14-base62-random>` (30 chars total).
+fn generate_session_id(seed_extra: u64) -> String {
+    let ts = current_time_millis();
+    let ts_hex = format!("{ts:012x}");
+
+    let mut state = ts ^ seed_extra.wrapping_mul(0x9e3779b97f4a7c15);
+    if state == 0 {
+        state = 0xcbf29ce484222325;
+    }
+
+    let mut suffix = [0u8; 14];
+    for b in suffix.iter_mut() {
+        state = state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        let rnd = (z ^ (z >> 31)) as usize;
+        *b = BASE62_CHARS[rnd % 62];
+    }
+    let suffix_str = std::str::from_utf8(&suffix).unwrap_or("00000000000000");
+    format!("ses_{ts_hex}{suffix_str}")
+}
+
+pub fn apply_auth(provider_json: &str, credential: &str) -> Result<String, AdapterError> {
+    let session_id = extract_session_id(provider_json, credential)
+        .unwrap_or_else(|| generate_session_id(fnv1a(provider_json)));
+
     Ok(json!([
         ["Authorization", "Bearer public"],
         ["x-opencode-client", "desktop"],
+        ["x-opencode-project", "default"],
+        ["x-opencode-session", session_id],
         ["Content-Type", "application/json"],
         ["Accept", "text/event-stream"],
         ["User-Agent", USER_AGENT]
@@ -535,5 +615,57 @@ mod tests {
             .unwrap()
             .iter()
             .any(|event| event["type"] == "text_delta"));
+    }
+
+    #[test]
+    fn apply_auth_generates_valid_session_and_project_headers() {
+        let headers: Vec<(String, String)> =
+            serde_json::from_str(&apply_auth("{}", "").unwrap()).unwrap();
+        let map: std::collections::HashMap<_, _> = headers.into_iter().collect();
+
+        assert_eq!(
+            map.get("Authorization").map(String::as_str),
+            Some("Bearer public")
+        );
+        assert_eq!(
+            map.get("x-opencode-client").map(String::as_str),
+            Some("desktop")
+        );
+        assert_eq!(
+            map.get("x-opencode-project").map(String::as_str),
+            Some("default")
+        );
+        assert_eq!(map.get("User-Agent").map(String::as_str), Some(USER_AGENT));
+
+        let session = map
+            .get("x-opencode-session")
+            .expect("missing x-opencode-session header");
+        assert!(
+            is_valid_session_id(session),
+            "session id {session} must be valid OpenCode format"
+        );
+        assert_eq!(session.len(), 30);
+        assert!(session.starts_with("ses_"));
+    }
+
+    #[test]
+    fn apply_auth_preserves_explicit_session_id() {
+        let custom_session = "ses_01a0c1ed0d77UteRivKIZVE10s";
+        let headers: Vec<(String, String)> =
+            serde_json::from_str(&apply_auth("{}", custom_session).unwrap()).unwrap();
+        let map: std::collections::HashMap<_, _> = headers.into_iter().collect();
+        assert_eq!(
+            map.get("x-opencode-session").map(String::as_str),
+            Some(custom_session)
+        );
+
+        let provider = format!(r#"{{"session_id":"{custom_session}"}}"#);
+        let headers: Vec<(String, String)> =
+            serde_json::from_str(&apply_auth(&provider, "").unwrap()).unwrap();
+        let map: std::collections::HashMap<_, _> = headers.into_iter().collect();
+        assert_eq!(
+            map.get("x-opencode-session").map(String::as_str),
+            Some(custom_session)
+        );
     }
 }
