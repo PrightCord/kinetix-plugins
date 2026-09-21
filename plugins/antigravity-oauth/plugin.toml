@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.antigravity-oauth"
 name = "Antigravity OAuth"
-version = "0.1.2"
+version = "0.1.3"
 plugin_api = "1"
 
 # Antigravity accounts are provisioned by a host-managed refresh-token exchange
@@ -37,6 +37,18 @@ key = "login_hint"
 label = "Google account hint"
 kind = "text"
 description = "Optional email address shown as Google's login hint during account authorization."
+
+[[ui.settings]]
+key = "client_id"
+label = "Google OAuth Client ID"
+kind = "text"
+description = "Optional Google Web Application OAuth client ID for remote HTTPS deployments. Configure together with the client secret."
+
+[[ui.settings]]
+key = "client_secret"
+label = "Google OAuth Client Secret"
+kind = "secret"
+description = "Optional Google Web Application OAuth client secret. Configure together with the client ID."
 
 [[ui.actions]]
 id = "connect-account"
