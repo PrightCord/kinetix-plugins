@@ -60,6 +60,71 @@ fn default_client_secret() -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OAuthClient {
+    client_id: String,
+    client_secret: String,
+    custom: bool,
+}
+
+fn select_oauth_client(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<OAuthClient, String> {
+    match (client_id, client_secret) {
+        (None, None) => Ok(OAuthClient {
+            client_id: default_client_id(),
+            client_secret: default_client_secret(),
+            custom: false,
+        }),
+        (Some(client_id), Some(client_secret)) => Ok(OAuthClient {
+            client_id,
+            client_secret,
+            custom: true,
+        }),
+        _ => Err("client_id and client_secret must be configured together".into()),
+    }
+}
+
+fn is_loopback_redirect(redirect_uri: &str) -> bool {
+    redirect_uri.starts_with("http://localhost:")
+        || redirect_uri.starts_with("http://127.0.0.1:")
+        || redirect_uri.starts_with("http://[::1]:")
+}
+
+fn validate_redirect_uri(client: &OAuthClient, redirect_uri: &str) -> Result<(), String> {
+    if !client.custom && !is_loopback_redirect(redirect_uri) {
+        return Err(
+            "the bundled Antigravity OAuth client requires a loopback KINETIX_PUBLIC_BASE_URL"
+                .into(),
+        );
+    }
+
+    if client.custom
+        && !redirect_uri.starts_with("https://")
+        && !is_loopback_redirect(redirect_uri)
+    {
+        return Err(
+            "custom Antigravity OAuth clients require an HTTPS or loopback redirect URI".into(),
+        );
+    }
+
+    Ok(())
+}
+
+fn config_string(bytes: Option<Vec<u8>>) -> Option<String> {
+    let value = String::from_utf8(bytes?).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn credential_oauth_client() -> Result<OAuthClient, String> {
+    select_oauth_client(
+        config_string(kinetix::plugin::host_storage::get("_config:client_id")),
+        config_string(kinetix::plugin::host_storage::get("_config:client_secret")),
+    )
+}
+
 /// Refresh a token this many ms before its stated expiry.
 const REFRESH_LEAD_MS: i64 = 5 * 60 * 1000;
 /// KV key prefix where the live access token is written for the host.
@@ -191,11 +256,12 @@ fn refresh(cred: &mut Credential) -> Result<(), String> {
         .refresh_token
         .clone()
         .ok_or_else(|| "no refresh_token".to_string())?;
+    let client = credential_oauth_client()?;
     let form = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
         urlencode(&refresh_token),
-        urlencode(&default_client_id()),
-        urlencode(&default_client_secret()),
+        urlencode(&client.client_id),
+        urlencode(&client.client_secret),
     );
     let req = HttpRequest {
         method: "POST".into(),
@@ -247,7 +313,6 @@ fn handle_for(account: &AccountRef) -> String {
     }
     format!("{h:016x}")
 }
-
 fn state_key(account: &AccountRef) -> String {
     format!("cred:{}", handle_for(account))
 }
@@ -349,6 +414,26 @@ fn auth_error(code: &str, message: impl Into<String>, retryable: bool) -> AuthPl
     }
 }
 
+fn auth_oauth_client() -> Result<OAuthClient, AuthPluginError> {
+    select_oauth_client(
+        config_string(auth_world::kinetix::plugin::host_storage::get(
+            "_config:client_id",
+        )),
+        config_string(auth_world::kinetix::plugin::host_storage::get(
+            "_config:client_secret",
+        )),
+    )
+    .map_err(|message| auth_error("invalid_configuration", message, false))
+}
+
+fn validate_auth_redirect(
+    client: &OAuthClient,
+    redirect_uri: &str,
+) -> Result<(), AuthPluginError> {
+    validate_redirect_uri(client, redirect_uri)
+        .map_err(|message| auth_error("invalid_configuration", message, false))
+}
+
 fn require_antigravity_flow(flow_name: &str) -> Result<(), AuthPluginError> {
     if flow_name == "antigravity" {
         Ok(())
@@ -370,24 +455,12 @@ impl auth_world::exports::auth_flow::Guest for Component {
     ) -> Result<String, AuthPluginError> {
         require_antigravity_flow(&flow_name)?;
 
-        // The bundled Antigravity OAuth client is a desktop/native client.
-        // Google permits it to use loopback redirects, not arbitrary hosted
-        // dashboard origins. A future declarative settings layer can support
-        // operator-provided web-client credentials for remote deployments.
-        let loopback = redirect_uri.starts_with("http://localhost:")
-            || redirect_uri.starts_with("http://127.0.0.1:")
-            || redirect_uri.starts_with("http://[::1]:");
-        if !loopback {
-            return Err(auth_error(
-                "invalid_configuration",
-                "the bundled Antigravity OAuth client requires a loopback KINETIX_PUBLIC_BASE_URL",
-                false,
-            ));
-        }
+        let client = auth_oauth_client()?;
+        validate_auth_redirect(&client, &redirect_uri)?;
 
         let mut url = format!(
             "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&access_type=offline&prompt=consent",
-            urlencode(&default_client_id()),
+            urlencode(&client.client_id),
             urlencode(&redirect_uri),
             urlencode(&ANTIGRAVITY_SCOPES.join(" ")),
             urlencode(&state),
@@ -417,10 +490,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
     ) -> Result<AuthResult, AuthPluginError> {
         require_antigravity_flow(&flow_name)?;
 
+        let client = auth_oauth_client()?;
+        validate_auth_redirect(&client, &redirect_uri)?;
+
         let mut form = format!(
             "grant_type=authorization_code&client_id={}&client_secret={}&code={}&redirect_uri={}",
-            urlencode(&default_client_id()),
-            urlencode(&default_client_secret()),
+            urlencode(&client.client_id),
+            urlencode(&client.client_secret),
             urlencode(&code),
             urlencode(&redirect_uri),
         );
@@ -497,8 +573,7 @@ impl auth_world::exports::auth_flow::Guest for Component {
         let mut email: Option<String> = None;
         let mut metadata: Option<String> = None;
         let userinfo_req = AuthHttpRequest {
-            method: "GET".into(),
-            url: format!("{USERINFO_URL}?alt=json"),
+            method: "GET".into(),            url: format!("{USERINFO_URL}?alt=json"),
             headers: vec![
                 ("authorization".into(), format!("Bearer {access_token}")),
                 ("x-request-source".into(), "local".into()),
@@ -569,6 +644,18 @@ fn model_error(code: &str, message: impl Into<String>, retryable: bool) -> Model
     }
 }
 
+fn model_oauth_client() -> Result<OAuthClient, ModelPluginError> {
+    select_oauth_client(
+        config_string(model_world::kinetix::plugin::host_storage::get(
+            "_config:client_id",
+        )),
+        config_string(model_world::kinetix::plugin::host_storage::get(
+            "_config:client_secret",
+        )),
+    )
+    .map_err(|message| model_error("invalid_configuration", message, false))
+}
+
 fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginError> {
     let refresh_token = cred
         .refresh_token
@@ -576,11 +663,12 @@ fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginErro
         .filter(|value| !value.is_empty())
         .ok_or_else(|| model_error("credential_expired", "missing refresh_token", false))?;
 
+    let client = model_oauth_client()?;
     let form = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
         urlencode(refresh_token),
-        urlencode(&default_client_id()),
-        urlencode(&default_client_secret()),
+        urlencode(&client.client_id),
+        urlencode(&client.client_secret),
     );
     let req = ModelHttpRequest {
         method: "POST".into(),
@@ -747,8 +835,7 @@ impl model_world::exports::account_model_source::Guest for Component {
         }
         let access_token = credential
             .access_token
-            .as_deref()
-            .filter(|value| !value.is_empty())
+            .as_deref()            .filter(|value| !value.is_empty())
             .ok_or_else(|| model_error("credential_expired", "no access token available", false))?;
 
         let req = ModelHttpRequest {
@@ -899,6 +986,57 @@ export!(Component with_types_in kinetix_plugin_sdk);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_client_override_requires_id_and_secret_together() {
+        assert!(select_oauth_client(None, None).is_ok());
+        assert!(select_oauth_client(Some("id".into()), Some("secret".into())).is_ok());
+        assert!(select_oauth_client(Some("id".into()), None).is_err());
+        assert!(select_oauth_client(None, Some("secret".into())).is_err());
+    }
+
+    #[test]
+    fn bundled_oauth_client_requires_loopback_redirect() {
+        let client = select_oauth_client(None, None).unwrap();
+
+        assert!(validate_redirect_uri(
+            &client,
+            "http://127.0.0.1:8080/admin/api/plugins/auth/callback"
+        )
+        .is_ok());
+        assert!(validate_redirect_uri(
+            &client,
+            "http://localhost:8080/admin/api/plugins/auth/callback"
+        )
+        .is_ok());
+        assert!(validate_redirect_uri(
+            &client,
+            "https://kinetix.example.com/admin/api/plugins/auth/callback"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn custom_oauth_client_allows_https_or_loopback_redirect() {
+        let client =
+            select_oauth_client(Some("id".into()), Some("secret".into())).unwrap();
+
+        assert!(validate_redirect_uri(
+            &client,
+            "https://kinetix.example.com/admin/api/plugins/auth/callback"
+        )
+        .is_ok());
+        assert!(validate_redirect_uri(
+            &client,
+            "http://127.0.0.1:8080/admin/api/plugins/auth/callback"
+        )
+        .is_ok());
+        assert!(validate_redirect_uri(
+            &client,
+            "http://kinetix.example.com/admin/api/plugins/auth/callback"
+        )
+        .is_err());
+    }
 
     #[test]
     fn parses_fetch_available_models_object_shape() {
