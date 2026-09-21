@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.claude-code-oauth"
 name = "Claude Code OAuth"
-version = "0.1.3"
+version = "0.1.4"
 plugin_api = "1"
 
 [provides]
@@ -25,6 +25,7 @@ follow_redirects = false
 
 [integrations.provider.extra_headers]
 anthropic-beta = "oauth-2025-04-20"
+anthropic-version = "2023-06-01"
 
 [[ui.actions]]
 id = "connect-account"
