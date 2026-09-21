@@ -573,7 +573,8 @@ impl auth_world::exports::auth_flow::Guest for Component {
         let mut email: Option<String> = None;
         let mut metadata: Option<String> = None;
         let userinfo_req = AuthHttpRequest {
-            method: "GET".into(),            url: format!("{USERINFO_URL}?alt=json"),
+            method: "GET".into(),
+            url: format!("{USERINFO_URL}?alt=json"),
             headers: vec![
                 ("authorization".into(), format!("Bearer {access_token}")),
                 ("x-request-source".into(), "local".into()),
@@ -835,7 +836,8 @@ impl model_world::exports::account_model_source::Guest for Component {
         }
         let access_token = credential
             .access_token
-            .as_deref()            .filter(|value| !value.is_empty())
+            .as_deref()
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| model_error("credential_expired", "no access token available", false))?;
 
         let req = ModelHttpRequest {
