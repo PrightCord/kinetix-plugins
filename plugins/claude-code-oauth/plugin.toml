@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.claude-code-oauth"
 name = "Claude Code OAuth"
-version = "0.1.2"
+version = "0.1.3"
 plugin_api = "1"
 
 [provides]
@@ -16,7 +16,7 @@ credential_strategy = "claude-code-oauth"
 auth_flow = "claude-code"
 
 [integrations.provider]
-base_url = "https://api.anthropic.com"
+base_url = "https://api.anthropic.com/v1"
 wire_format = "anthropic"
 auth_scheme = "bearer"
 timeout_ms = 600000
