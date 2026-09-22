@@ -6,10 +6,8 @@ use serde_json::Value;
 
 const RESPONSE_SCHEMA: &str =
     include_str!("../../wit/contracts/kinetix.plugin.response.v1.schema.json");
-const ALL_EVENTS: &str =
-    include_str!("../../wit/fixtures/plugin-response/v1/all-events.json");
-const WARNING: &str =
-    include_str!("../../wit/fixtures/plugin-response/v1/warning.json");
+const ALL_EVENTS: &str = include_str!("../../wit/fixtures/plugin-response/v1/all-events.json");
+const WARNING: &str = include_str!("../../wit/fixtures/plugin-response/v1/warning.json");
 const TERMINAL_ERROR: &str =
     include_str!("../../wit/fixtures/plugin-response/v1/terminal-error.json");
 const INVALID_VERSION: &str =
@@ -28,10 +26,7 @@ fn assert_v1_envelope(value: &Value) {
         value.get("schema").and_then(Value::as_str),
         Some("kinetix.plugin.response")
     );
-    assert_eq!(
-        value.get("schema_version").and_then(Value::as_u64),
-        Some(1)
-    );
+    assert_eq!(value.get("schema_version").and_then(Value::as_u64), Some(1));
     assert!(value.get("events").and_then(Value::as_array).is_some());
 }
 
