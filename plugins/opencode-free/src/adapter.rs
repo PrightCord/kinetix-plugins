@@ -454,15 +454,19 @@ fn parse_chat(value: &Value) -> Vec<Value> {
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for tool_call in tool_calls {
+                for (position, tool_call) in tool_calls.iter().enumerate() {
                     let index = tool_call
                         .get("index")
                         .and_then(Value::as_u64)
-                        .unwrap_or(0);
+                        .unwrap_or(position as u64);
                     let id = tool_call.get("id").and_then(Value::as_str);
-                    let function = tool_call.get("function").unwrap_or(&Value::Null);
-                    let name = function.get("name").and_then(Value::as_str);
-                    let arguments = function.get("arguments").and_then(Value::as_str);
+                    let function = tool_call.get("function");
+                    let name = function
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str);
+                    let arguments = function
+                        .and_then(|function| function.get("arguments"))
+                        .and_then(Value::as_str);
 
                     if id.is_some() || name.is_some() {
                         events.push(json!({
@@ -605,7 +609,6 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
     Ok(Value::Array(events).to_string())
 }
 
-pub 
 pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
     let value: Value = serde_json::from_str(body_json)
         .map_err(|e| err("protocol_error", format!("invalid response JSON: {e}")))?;
