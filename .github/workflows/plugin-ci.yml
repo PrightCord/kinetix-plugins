@@ -20,6 +20,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Run plugin unit tests
+        run: cargo test --workspace
       - name: Check plugin workspace
         run: cargo check --locked --workspace --target wasm32-unknown-unknown
       - name: Validate catalog JSON
