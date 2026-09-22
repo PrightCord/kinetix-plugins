@@ -433,7 +433,6 @@ fn finish_event(reason: &str) -> Value {
     json!({"type":"finish","reason":reason})
 }
 
-
 fn parse_chat(value: &Value) -> Vec<Value> {
     let mut events = Vec::new();
 
@@ -506,7 +505,6 @@ fn parse_chat(value: &Value) -> Vec<Value> {
 
     events
 }
-
 
 fn parse_responses(value: &Value) -> Vec<Value> {
     let mut events = Vec::new();
@@ -798,9 +796,9 @@ mod tests {
                 && event["index"] == 1
                 && event["args"] == "\"pwd\"}"
         }));
-        assert!(second.iter().any(|event| {
-            event["type"] == "finish" && event["reason"] == "tool_calls"
-        }));
+        assert!(second
+            .iter()
+            .any(|event| { event["type"] == "finish" && event["reason"] == "tool_calls" }));
     }
 
     #[test]
@@ -839,9 +837,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(completed.as_array().unwrap().iter().any(|event| {
-            event["type"] == "finish" && event["reason"] == "tool_calls"
-        }));
+        assert!(completed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| { event["type"] == "finish" && event["reason"] == "tool_calls" }));
     }
 
     #[test]
@@ -866,9 +866,9 @@ mod tests {
                 && event["index"] == 0
                 && event["args"] == "{\"cmd\":\"pwd\"}"
         }));
-        assert!(events.iter().any(|event| {
-            event["type"] == "finish" && event["reason"] == "tool_calls"
-        }));
+        assert!(events
+            .iter()
+            .any(|event| { event["type"] == "finish" && event["reason"] == "tool_calls" }));
     }
 
     #[test]
