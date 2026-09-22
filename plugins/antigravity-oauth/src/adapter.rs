@@ -367,7 +367,11 @@ fn apply_thinking(
             "low" => (1024, true, 8192),
             "medium" => (8192, true, 16384),
             "high" => (24576, true, 32768),
-            other => return Err(bad(format!("unsupported canonical thinking level '{other}'"))),
+            other => {
+                return Err(bad(format!(
+                    "unsupported canonical thinking level '{other}'"
+                )))
+            }
         };
         generation_config.insert(
             "thinkingConfig".into(),
