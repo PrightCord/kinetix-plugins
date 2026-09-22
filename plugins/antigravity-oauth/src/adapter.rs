@@ -377,7 +377,7 @@ fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
         .pointer("/tool_choice/mode")
         .and_then(Value::as_str)
         .unwrap_or("auto");
-    let mut config = match mode {
+    let config = match mode {
         "auto" => json!({ "mode": "VALIDATED" }),
         "none" => json!({ "mode": "NONE" }),
         "required" => json!({ "mode": "ANY" }),
@@ -394,7 +394,7 @@ fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
         }
         other => return Err(bad(format!("unsupported canonical tool choice '{other}'"))),
     };
-    Ok(Some(json!({ "functionCallingConfig": config.take() })))
+    Ok(Some(json!({ "functionCallingConfig": config })))
 }
 
 fn project_id(provider: &Value, req: &Value) -> String {
@@ -768,10 +768,16 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
 fn part_to_gemini(p: &Value) -> Option<Value> {
     match p.get("type").and_then(|t| t.as_str())? {
         "text" => Some(json!({ "text": p.get("text").and_then(|t| t.as_str()).unwrap_or("") })),
-        "thinking" => Some(json!({
-            "thought": true,
-            "text": p.get("text").and_then(|t| t.as_str()).unwrap_or("")
-        })),
+        "thinking" => {
+            let mut part = json!({
+                "thought": true,
+                "text": p.get("text").and_then(|t| t.as_str()).unwrap_or("")
+            });
+            if let Some(signature) = p.get("signature").and_then(Value::as_str) {
+                part["thoughtSignature"] = json!(signature);
+            }
+            Some(part)
+        },
         "image" => Some(json!({
             "inlineData": {
                 "mimeType": p.get("mime").and_then(|m| m.as_str()).unwrap_or("image/png"),
@@ -1177,6 +1183,215 @@ mod tests {
             url_slash,
             "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn permissive_extra_fields_are_dropped_not_forwarded() {
+        let provider = json!({ "capability_mode": "permissive" });
+        let req = json!({
+            "schema": "kinetix.plugin.request",
+            "schema_version": 1,
+            "extra": {
+                "session_id": "sess-1",
+                "antigravity_project": "project-1",
+                "service_tier": "auto",
+                "parallel_tool_calls": true,
+                "claude_code_session": "cc-1"
+            }
+        });
+
+        assert!(validate_canonical_extras(&provider, &req).is_ok());
+        assert_eq!(session_id(&req), "sess-1");
+        assert_eq!(project_id(&provider, &req), "project-1");
+    }
+
+    #[test]
+    fn strict_extra_fields_are_rejected() {
+        let provider = json!({ "capability_mode": "strict" });
+        let req = json!({
+            "extra": {
+                "session_id": "sess-1",
+                "service_tier": "auto"
+            }
+        });
+        let error = validate_canonical_extras(&provider, &req).unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert!(error.message.contains("service_tier"));
+    }
+
+    #[test]
+    fn canonical_tool_choice_maps_to_antigravity_modes() {
+        let auto = json!({ "tool_choice": { "mode": "auto", "name": null } });
+        assert_eq!(
+            build_tool_config(&auto).unwrap().unwrap(),
+            json!({ "functionCallingConfig": { "mode": "VALIDATED" } })
+        );
+
+        let required = json!({ "tool_choice": { "mode": "required", "name": null } });
+        assert_eq!(
+            build_tool_config(&required).unwrap().unwrap(),
+            json!({ "functionCallingConfig": { "mode": "ANY" } })
+        );
+
+        let none = json!({ "tool_choice": { "mode": "none", "name": null } });
+        assert_eq!(
+            build_tool_config(&none).unwrap().unwrap(),
+            json!({ "functionCallingConfig": { "mode": "NONE" } })
+        );
+
+        let specific = json!({
+            "tool_choice": { "mode": "specific", "name": "read file!" }
+        });
+        assert_eq!(
+            build_tool_config(&specific).unwrap().unwrap(),
+            json!({
+                "functionCallingConfig": {
+                    "mode": "ANY",
+                    "allowedFunctionNames": ["read_file_"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn canonical_thinking_maps_to_gemini_native_config() {
+        let mut gemini3 = Map::new();
+        apply_thinking(
+            &mut gemini3,
+            &json!({ "thinking": { "level": "high" } }),
+            "gemini-3.7-flash-tiered",
+        )
+        .unwrap();
+        assert_eq!(
+            gemini3["thinkingConfig"],
+            json!({ "thinkingLevel": "high", "includeThoughts": true })
+        );
+        assert_eq!(gemini3["maxOutputTokens"], MAX_OUTPUT_TOKENS);
+
+        let mut gemini25 = Map::new();
+        apply_thinking(
+            &mut gemini25,
+            &json!({ "thinking": { "level": "medium" } }),
+            "gemini-2.5-pro",
+        )
+        .unwrap();
+        assert_eq!(
+            gemini25["thinkingConfig"],
+            json!({ "thinkingBudget": 8192, "includeThoughts": true })
+        );
+        assert_eq!(gemini25["maxOutputTokens"], 16384);
+
+        let mut off = Map::new();
+        apply_thinking(
+            &mut off,
+            &json!({ "thinking": { "level": "off" } }),
+            "gemini-3.8-flash",
+        )
+        .unwrap();
+        assert_eq!(
+            off["thinkingConfig"],
+            json!({ "thinkingLevel": "minimal", "includeThoughts": false })
+        );
+
+        let mut unsupported = Map::new();
+        assert!(apply_thinking(
+            &mut unsupported,
+            &json!({ "thinking": { "level": "high" } }),
+            "claude-sonnet-4-5",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tool_schema_matches_core_gemini_subset() {
+        let schema = json!({
+            "$ref": "#/definitions/Envelope",
+            "definitions": {
+                "Envelope": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "payload": { "$ref": "#/definitions/Payload" }
+                    },
+                    "required": ["payload"]
+                },
+                "Payload": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "const": "ok" },
+                        "value": { "type": ["string", "null"] },
+                        "choice": {
+                            "oneOf": [
+                                { "type": "string" },
+                                { "type": "number" }
+                            ]
+                        },
+                        "tuple": {
+                            "type": "array",
+                            "items": [
+                                { "type": "string" },
+                                { "type": "integer" }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let got = sanitize_schema(&schema, "tool 'fixture'").unwrap();
+
+        assert_eq!(got["$ref"], "#/$defs/Envelope");
+        assert_eq!(
+            got.pointer("/$defs/Envelope/additionalProperties"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            got.pointer("/$defs/Payload/properties/kind/enum"),
+            Some(&json!(["ok"]))
+        );
+        assert_eq!(
+            got.pointer("/$defs/Payload/properties/choice/anyOf/1/type"),
+            Some(&json!("number"))
+        );
+        assert_eq!(
+            got.pointer("/$defs/Payload/properties/tuple/prefixItems/1/type"),
+            Some(&json!("integer"))
+        );
+    }
+
+    #[test]
+    fn tool_schema_rejects_unsupported_keywords() {
+        for (keyword, value) in [
+            ("exclusiveMinimum", json!(0)),
+            ("exclusiveMaximum", json!(10)),
+            ("propertyNames", json!({ "type": "string" })),
+            ("pattern", json!("^[a-z]+$")),
+        ] {
+            let mut property = json!({ "type": "string" });
+            property
+                .as_object_mut()
+                .unwrap()
+                .insert(keyword.to_string(), value);
+            let schema = json!({
+                "type": "object",
+                "properties": { "value": property }
+            });
+
+            let error = sanitize_schema(&schema, "tool 'fixture'").unwrap_err();
+            assert_eq!(error.code, "bad_request");
+            assert!(error.message.contains(keyword));
+        }
+    }
+
+    #[test]
+    fn thinking_history_preserves_signature() {
+        let part = part_to_gemini(&json!({
+            "type": "thinking",
+            "text": "",
+            "signature": "sig-1"
+        }))
+        .unwrap();
+        assert_eq!(part["thought"], true);
+        assert_eq!(part["thoughtSignature"], "sig-1");
     }
 
     #[test]
