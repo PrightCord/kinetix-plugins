@@ -115,7 +115,7 @@ pub fn build_body(
         .unwrap_or("gemini-3-flash")
         .to_string();
 
-    let project = project_id(&provider, &req);
+    let project = project_id(&provider, &req)?;
     let session_id = session_id(&req);
     let request_id = build_request_id(&session_id, &upstream_model);
 
@@ -416,10 +416,10 @@ fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
     Ok(Some(json!({ "functionCallingConfig": config })))
 }
 
-fn project_id(provider: &Value, req: &Value) -> String {
-    // Prefer an operator-configured project (provider extra_headers), then a
-    // client-supplied hint, then a deterministic fallback (the API accepts a
-    // generated id when the account has no explicit project).
+fn project_id(provider: &Value, req: &Value) -> Result<String, AdapterError> {
+    // Explicit operator override wins. Otherwise use the account-scoped
+    // project resolved by the credential strategy. A client hint remains a
+    // compatibility fallback for manually imported credentials.
     if let Some(project) = provider
         .get("extra_headers")
         .and_then(|e| e.as_str())
@@ -427,27 +427,34 @@ fn project_id(provider: &Value, req: &Value) -> String {
         .and_then(|v| {
             v.get("x-antigravity-project")
                 .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
                 .map(str::to_string)
         })
     {
-        return project;
+        return Ok(project);
+    }
+    if let Some(project) = provider
+        .pointer("/_kinetix/project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+    {
+        return Ok(project.to_string());
     }
     if let Some(project) = req
         .get("extra")
         .and_then(|e| e.get("antigravity_project"))
         .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
     {
-        return project.to_string();
+        return Ok(project.to_string());
     }
-    let seed = format!(
-        "{}:{}",
-        req.get("requested_model")
-            .and_then(|m| m.as_str())
-            .unwrap_or(""),
-        session_id(req)
-    );
-    let h = fnv1a(&seed);
-    format!("kinetix-{h:08x}")
+    Err(err(
+        "invalid_configuration",
+        "Antigravity account has no provisioned Google Cloud project ID; reconnect the account or configure x-antigravity-project",
+    ))
 }
 
 fn session_id(req: &Value) -> String {
@@ -1206,6 +1213,42 @@ mod tests {
             url_slash,
             "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn project_id_prefers_account_project_over_client_hint() {
+        let provider = json!({
+            "_kinetix": {
+                "account_id": "account-1",
+                "project_id": "provisioned-project"
+            }
+        });
+        let req = json!({
+            "extra": { "antigravity_project": "client-project" }
+        });
+        assert_eq!(
+            project_id(&provider, &req).unwrap(),
+            "provisioned-project"
+        );
+    }
+
+    #[test]
+    fn project_id_operator_override_wins() {
+        let provider = json!({
+            "extra_headers": r#"{"x-antigravity-project":"operator-project"}"#,
+            "_kinetix": { "project_id": "provisioned-project" }
+        });
+        assert_eq!(
+            project_id(&provider, &json!({})).unwrap(),
+            "operator-project"
+        );
+    }
+
+    #[test]
+    fn project_id_fails_without_real_identity() {
+        let error = project_id(&json!({}), &json!({})).unwrap_err();
+        assert_eq!(error.code, "invalid_configuration");
+        assert!(error.message.contains("no provisioned Google Cloud project ID"));
     }
 
     #[test]
