@@ -141,7 +141,11 @@ pub fn build_body(
     let mut contents = Vec::new();
     if let Some(messages) = req.get("messages").and_then(Value::as_array) {
         for message in messages {
-            let role = match message.get("role").and_then(Value::as_str).unwrap_or("user") {
+            let role = match message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user")
+            {
                 "assistant" => "model",
                 _ => "user",
             };
@@ -214,10 +218,7 @@ pub fn build_body(
     if let Some(instruction) = system_instruction {
         request.insert("systemInstruction".into(), instruction);
     }
-    request.insert(
-        "generationConfig".into(),
-        Value::Object(generation_config),
-    );
+    request.insert("generationConfig".into(), Value::Object(generation_config));
     if !declarations.is_empty() {
         request.insert(
             "tools".into(),
@@ -250,7 +251,9 @@ fn provider_is_strict(provider: &Value) -> bool {
 fn validate_request_contract(req: &Value) -> Result<(), AdapterError> {
     if let Some(schema) = req.get("schema").and_then(Value::as_str) {
         if schema != "kinetix.plugin.request" {
-            return Err(bad(format!("unsupported canonical request schema '{schema}'")));
+            return Err(bad(format!(
+                "unsupported canonical request schema '{schema}'"
+            )));
         }
     }
     if let Some(version) = req.get("schema_version").and_then(Value::as_u64) {
@@ -290,10 +293,18 @@ fn validate_nonportable_controls(provider: &Value, req: &Value) -> Result<(), Ad
         return Ok(());
     }
     let mut unsupported = Vec::new();
-    if !req.get("presence_penalty").unwrap_or(&Value::Null).is_null() {
+    if !req
+        .get("presence_penalty")
+        .unwrap_or(&Value::Null)
+        .is_null()
+    {
         unsupported.push("presence_penalty");
     }
-    if !req.get("frequency_penalty").unwrap_or(&Value::Null).is_null() {
+    if !req
+        .get("frequency_penalty")
+        .unwrap_or(&Value::Null)
+        .is_null()
+    {
         unsupported.push("frequency_penalty");
     }
     if unsupported.is_empty() {
@@ -333,7 +344,11 @@ fn apply_thinking(
             "low" => ("low", true, 8192),
             "medium" => ("medium", true, 16384),
             "high" => ("high", true, MAX_OUTPUT_TOKENS),
-            other => return Err(bad(format!("unsupported canonical thinking level '{other}'"))),
+            other => {
+                return Err(bad(format!(
+                    "unsupported canonical thinking level '{other}'"
+                )))
+            }
         };
         generation_config.insert(
             "thinkingConfig".into(),
@@ -566,7 +581,12 @@ fn add_nullable_type(schema: &mut Map<String, Value>, path: &str) -> Result<(), 
                 return Ok(());
             }
             Value::String(_) => return Ok(()),
-            _ => return Err(schema_error(path, "nullable requires a string or array type")),
+            _ => {
+                return Err(schema_error(
+                    path,
+                    "nullable requires a string or array type",
+                ))
+            }
         }
     }
 
@@ -709,8 +729,7 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
             }
 
             "$id" | "$anchor" | "type" | "format" | "title" | "description" | "enum"
-            | "minItems" | "maxItems" | "minimum" | "maximum" | "required"
-            | "propertyOrdering" => {
+            | "minItems" | "maxItems" | "minimum" | "maximum" | "required" | "propertyOrdering" => {
                 out.insert(key.clone(), value.clone());
             }
 
@@ -777,7 +796,7 @@ fn part_to_gemini(p: &Value) -> Option<Value> {
                 part["thoughtSignature"] = json!(signature);
             }
             Some(part)
-        },
+        }
         "image" => Some(json!({
             "inlineData": {
                 "mimeType": p.get("mime").and_then(|m| m.as_str()).unwrap_or("image/png"),
