@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.antigravity-oauth"
 name = "Antigravity OAuth"
-version = "0.1.3"
+version = "0.1.4"
 plugin_api = "1"
 
 # Antigravity accounts are provisioned by a host-managed refresh-token exchange
@@ -48,7 +48,7 @@ description = "Sign in with Google and add an Antigravity account to a bound pro
 [permissions]
 # Browser authorization is host-validated; token exchange and userinfo are
 # performed through host-mediated buffered HTTP.
-network_hosts = ["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
+network_hosts = ["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com"]
 credential_scopes = ["credential_strategy:antigravity-oauth"]
 # The refresh_token exchange puts the secret in a POST body, which the opaque
 # handle model cannot express, so this plugin requires plaintext credential
@@ -57,7 +57,7 @@ credential_read = true
 
 [limits]
 memory = "64MiB"
-wall_time_ms = 10000
-max_outbound_requests = 2
+wall_time_ms = 30000
+max_outbound_requests = 6
 max_http_body = "1MiB"
 storage = "1MiB"
