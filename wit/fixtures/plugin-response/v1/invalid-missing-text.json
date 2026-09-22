@@ -1,0 +1,9 @@
+{
+  "schema": "kinetix.plugin.response",
+  "schema_version": 1,
+  "events": [
+    {
+      "type": "text_delta"
+    }
+  ]
+}
