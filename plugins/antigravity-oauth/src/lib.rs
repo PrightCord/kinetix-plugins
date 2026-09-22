@@ -32,10 +32,8 @@ use kinetix_plugin_sdk::{export, exports, kinetix};
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
-const LOAD_CODE_ASSIST_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-const ONBOARD_USER_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
+const LOAD_CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ONBOARD_USER_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
 const PROJECT_KEY_PREFIX: &str = "project:";
 const ANTIGRAVITY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -131,11 +129,7 @@ impl exports::credential_strategy::Guest for Component {
             Some(project) => project.to_string(),
             None => {
                 let project = resolve_project_id(&access).map_err(|e| {
-                    kinetix_plugin_sdk::helpers::retryable_error(
-                        "upstream_unavailable",
-                        e,
-                        Some(5),
-                    )
+                    kinetix_plugin_sdk::helpers::retryable_error("upstream_unavailable", e, Some(5))
                 })?;
                 cred.project_id = Some(project.clone());
                 persist_rotated(&account, &cred);
@@ -286,7 +280,10 @@ fn state_key(account: &AccountRef) -> String {
 }
 
 pub(crate) fn project_state_key(provider_id: &str, account_id: &str) -> String {
-    format!("{PROJECT_KEY_PREFIX}{}", account_handle(provider_id, account_id))
+    format!(
+        "{PROJECT_KEY_PREFIX}{}",
+        account_handle(provider_id, account_id)
+    )
 }
 
 fn persist_project(account: &AccountRef, project_id: &str) -> Result<(), String> {
@@ -295,7 +292,6 @@ fn persist_project(account: &AccountRef, project_id: &str) -> Result<(), String>
         project_id,
     )
 }
-
 
 fn antigravity_metadata() -> serde_json::Value {
     serde_json::json!({
@@ -348,7 +344,12 @@ fn project_headers(access_token: &str) -> Vec<(String, String)> {
     ]
 }
 
-fn decode_project_response(status: u16, body: Vec<u8>, truncated: bool, operation: &str) -> Result<serde_json::Value, String> {
+fn decode_project_response(
+    status: u16,
+    body: Vec<u8>,
+    truncated: bool,
+    operation: &str,
+) -> Result<serde_json::Value, String> {
     if truncated {
         return Err(format!("{operation} response truncated"));
     }
@@ -544,7 +545,6 @@ fn require_antigravity_flow(flow_name: &str) -> Result<(), AuthPluginError> {
     }
 }
 
-
 fn auth_project_headers(access_token: &str) -> Vec<(String, String)> {
     vec![
         ("authorization".into(), format!("Bearer {access_token}")),
@@ -582,8 +582,13 @@ fn send_auth_project_request(
             true,
         ));
     }
-    let text = String::from_utf8(resp.body)
-        .map_err(|_| auth_error("protocol_error", format!("{operation} response not utf-8"), false))?;
+    let text = String::from_utf8(resp.body).map_err(|_| {
+        auth_error(
+            "protocol_error",
+            format!("{operation} response not utf-8"),
+            false,
+        )
+    })?;
     if !(200..300).contains(&resp.status) {
         return Err(auth_error(
             "upstream_unavailable",
@@ -599,8 +604,13 @@ fn send_auth_project_request(
             resp.status >= 500,
         ));
     }
-    serde_json::from_str(&text)
-        .map_err(|e| auth_error("protocol_error", format!("invalid {operation} JSON: {e}"), false))
+    serde_json::from_str(&text).map_err(|e| {
+        auth_error(
+            "protocol_error",
+            format!("invalid {operation} JSON: {e}"),
+            false,
+        )
+    })
 }
 
 fn resolve_project_id_for_auth(access_token: &str) -> Result<String, AuthPluginError> {
@@ -1132,7 +1142,6 @@ fn adapter_err(
         reset_at: None,
     }
 }
-
 
 fn provider_with_account_project(provider_json: &str) -> String {
     let mut provider: serde_json::Value =
