@@ -32,6 +32,11 @@ use kinetix_plugin_sdk::{export, exports, kinetix};
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
+const LOAD_CODE_ASSIST_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ONBOARD_USER_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
+const PROJECT_KEY_PREFIX: &str = "project:";
 const ANTIGRAVITY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -115,6 +120,33 @@ impl exports::credential_strategy::Guest for Component {
 
         let access = cred.access_token.clone().ok_or_else(|| {
             kinetix_plugin_sdk::helpers::error("credential_expired", "no access token available")
+        })?;
+
+        let project = match cred
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(project) => project.to_string(),
+            None => {
+                let project = resolve_project_id(&access).map_err(|e| {
+                    kinetix_plugin_sdk::helpers::retryable_error(
+                        "upstream_unavailable",
+                        e,
+                        Some(5),
+                    )
+                })?;
+                cred.project_id = Some(project.clone());
+                persist_rotated(&account, &cred);
+                project
+            }
+        };
+        persist_project(&account, &project).map_err(|e| {
+            kinetix_plugin_sdk::helpers::error(
+                "plugin_internal",
+                format!("persisting Antigravity project: {e}"),
+            )
         })?;
 
         // The host reads the live token back from its encrypted KV under the
@@ -236,20 +268,171 @@ fn refresh(cred: &mut Credential) -> Result<(), String> {
 }
 
 /// A stable, opaque handle derived from the account (never the secret).
-fn handle_for(account: &AccountRef) -> String {
-    // The host derives its own lease handle too; this plugin only needs a stable
-    // KV key it can read back. Use the account ids directly (they are not
-    // secret) with a short hash to keep keys bounded.
+pub(crate) fn account_handle(provider_id: &str, account_id: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in format!("{}:{}", account.provider_id, account.account_id).bytes() {
+    for b in format!("{provider_id}:{account_id}").bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
     format!("{h:016x}")
 }
 
+fn handle_for(account: &AccountRef) -> String {
+    account_handle(&account.provider_id, &account.account_id)
+}
+
 fn state_key(account: &AccountRef) -> String {
     format!("cred:{}", handle_for(account))
+}
+
+pub(crate) fn project_state_key(provider_id: &str, account_id: &str) -> String {
+    format!("{PROJECT_KEY_PREFIX}{}", account_handle(provider_id, account_id))
+}
+
+fn persist_project(account: &AccountRef, project_id: &str) -> Result<(), String> {
+    kinetix_plugin_sdk::helpers::kv_put_string(
+        &project_state_key(&account.provider_id, &account.account_id),
+        project_id,
+    )
+}
+
+
+fn antigravity_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "ideType": 9,
+        "platform": 2,
+        "pluginType": 2,
+    })
+}
+
+fn extract_project_id(value: &serde_json::Value) -> Option<String> {
+    let project = value
+        .get("cloudaicompanionProject")
+        .or_else(|| value.pointer("/response/cloudaicompanionProject"))?;
+    if let Some(id) = project.as_str().map(str::trim).filter(|id| !id.is_empty()) {
+        return Some(id.to_string());
+    }
+    project
+        .get("id")
+        .and_then(|id| id.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn default_tier_id(value: &serde_json::Value) -> String {
+    value
+        .get("allowedTiers")
+        .and_then(|tiers| tiers.as_array())
+        .and_then(|tiers| {
+            tiers.iter().find_map(|tier| {
+                if tier.get("isDefault").and_then(|v| v.as_bool()) != Some(true) {
+                    return None;
+                }
+                tier.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| "legacy-tier".to_string())
+}
+
+fn project_headers(access_token: &str) -> Vec<(String, String)> {
+    vec![
+        ("authorization".into(), format!("Bearer {access_token}")),
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "application/json".into()),
+        ("user-agent".into(), crate::adapter::USER_AGENT.into()),
+    ]
+}
+
+fn decode_project_response(status: u16, body: Vec<u8>, truncated: bool, operation: &str) -> Result<serde_json::Value, String> {
+    if truncated {
+        return Err(format!("{operation} response truncated"));
+    }
+    let text = String::from_utf8(body).map_err(|_| format!("{operation} response not utf-8"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "{operation} returned HTTP {status}{}",
+            if text.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", text.chars().take(200).collect::<String>())
+            }
+        ));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("invalid {operation} JSON: {e}"))
+}
+
+fn resolve_project_id(access_token: &str) -> Result<String, String> {
+    let load = HttpRequest {
+        method: "POST".into(),
+        url: LOAD_CODE_ASSIST_URL.into(),
+        headers: project_headers(access_token),
+        body: serde_json::to_vec(&serde_json::json!({
+            "metadata": antigravity_metadata()
+        }))
+        .map_err(|e| format!("encoding loadCodeAssist request: {e}"))?,
+        credential: None,
+    };
+    let load = kinetix::plugin::host_http::send(&load)
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    let load = decode_project_response(
+        load.status,
+        load.body,
+        load.body_truncated,
+        "loadCodeAssist",
+    )?;
+    if let Some(project) = extract_project_id(&load) {
+        return Ok(project);
+    }
+
+    let tier_id = default_tier_id(&load);
+    let onboard = HttpRequest {
+        method: "POST".into(),
+        url: ONBOARD_USER_URL.into(),
+        headers: project_headers(access_token),
+        body: serde_json::to_vec(&serde_json::json!({
+            "tierId": tier_id,
+            "metadata": antigravity_metadata()
+        }))
+        .map_err(|e| format!("encoding onboardUser request: {e}"))?,
+        credential: None,
+    };
+    let onboard = kinetix::plugin::host_http::send(&onboard)
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    let onboard = decode_project_response(
+        onboard.status,
+        onboard.body,
+        onboard.body_truncated,
+        "onboardUser",
+    )?;
+    if let Some(project) = extract_project_id(&onboard) {
+        return Ok(project);
+    }
+
+    let reload = HttpRequest {
+        method: "POST".into(),
+        url: LOAD_CODE_ASSIST_URL.into(),
+        headers: project_headers(access_token),
+        body: serde_json::to_vec(&serde_json::json!({
+            "metadata": antigravity_metadata()
+        }))
+        .map_err(|e| format!("encoding loadCodeAssist request: {e}"))?,
+        credential: None,
+    };
+    let reload = kinetix::plugin::host_http::send(&reload)
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    let reload = decode_project_response(
+        reload.status,
+        reload.body,
+        reload.body_truncated,
+        "loadCodeAssist",
+    )?;
+    extract_project_id(&reload)
+        .ok_or_else(|| "Google did not provision a cloudaicompanionProject".to_string())
 }
 
 // --- Minimal RFC3339 helpers (no chrono in a no_std-ish guest) --------------
@@ -359,6 +542,104 @@ fn require_antigravity_flow(flow_name: &str) -> Result<(), AuthPluginError> {
             false,
         ))
     }
+}
+
+
+fn auth_project_headers(access_token: &str) -> Vec<(String, String)> {
+    vec![
+        ("authorization".into(), format!("Bearer {access_token}")),
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "application/json".into()),
+        ("user-agent".into(), crate::adapter::USER_AGENT.into()),
+    ]
+}
+
+fn send_auth_project_request(
+    url: &str,
+    access_token: &str,
+    body: serde_json::Value,
+    operation: &str,
+) -> Result<serde_json::Value, AuthPluginError> {
+    let req = AuthHttpRequest {
+        method: "POST".into(),
+        url: url.into(),
+        headers: auth_project_headers(access_token),
+        body: serde_json::to_vec(&body).map_err(|e| {
+            auth_error(
+                "plugin_internal",
+                format!("encoding {operation} request: {e}"),
+                false,
+            )
+        })?,
+        credential: None,
+    };
+    let resp = auth_world::kinetix::plugin::host_http::send(&req)
+        .map_err(|e| auth_error(&e.code, e.message, e.retryable))?;
+    if resp.body_truncated {
+        return Err(auth_error(
+            "upstream_unavailable",
+            format!("{operation} response truncated"),
+            true,
+        ));
+    }
+    let text = String::from_utf8(resp.body)
+        .map_err(|_| auth_error("protocol_error", format!("{operation} response not utf-8"), false))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(auth_error(
+            "upstream_unavailable",
+            format!(
+                "{operation} returned HTTP {}{}",
+                resp.status,
+                if text.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", text.chars().take(200).collect::<String>())
+                }
+            ),
+            resp.status >= 500,
+        ));
+    }
+    serde_json::from_str(&text)
+        .map_err(|e| auth_error("protocol_error", format!("invalid {operation} JSON: {e}"), false))
+}
+
+fn resolve_project_id_for_auth(access_token: &str) -> Result<String, AuthPluginError> {
+    let load = send_auth_project_request(
+        LOAD_CODE_ASSIST_URL,
+        access_token,
+        serde_json::json!({ "metadata": antigravity_metadata() }),
+        "loadCodeAssist",
+    )?;
+    if let Some(project) = extract_project_id(&load) {
+        return Ok(project);
+    }
+
+    let onboard = send_auth_project_request(
+        ONBOARD_USER_URL,
+        access_token,
+        serde_json::json!({
+            "tierId": default_tier_id(&load),
+            "metadata": antigravity_metadata()
+        }),
+        "onboardUser",
+    )?;
+    if let Some(project) = extract_project_id(&onboard) {
+        return Ok(project);
+    }
+
+    let reload = send_auth_project_request(
+        LOAD_CODE_ASSIST_URL,
+        access_token,
+        serde_json::json!({ "metadata": antigravity_metadata() }),
+        "loadCodeAssist",
+    )?;
+    extract_project_id(&reload).ok_or_else(|| {
+        auth_error(
+            "upstream_unavailable",
+            "Google did not provision a cloudaicompanionProject",
+            true,
+        )
+    })
 }
 
 impl auth_world::exports::auth_flow::Guest for Component {
@@ -520,11 +801,13 @@ impl auth_world::exports::auth_flow::Guest for Component {
             }
         }
 
+        let project_id = resolve_project_id_for_auth(&access_token)?;
+
         let secret = Credential {
             refresh_token: Some(refresh_token),
             access_token: Some(access_token),
             expiry: Some(expiry),
-            project_id: None,
+            project_id: Some(project_id),
             email: email.clone(),
         };
         let secret_json = serde_json::to_string(&secret).map_err(|e| {
@@ -850,6 +1133,40 @@ fn adapter_err(
     }
 }
 
+
+fn provider_with_account_project(provider_json: &str) -> String {
+    let mut provider: serde_json::Value =
+        serde_json::from_str(provider_json).unwrap_or_else(|_| serde_json::json!({}));
+    let provider_id = provider
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let account_id = provider
+        .pointer("/_kinetix/account_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    if let (Some(provider_id), Some(account_id)) = (provider_id, account_id) {
+        let key = project_state_key(&provider_id, &account_id);
+        if let Some(bytes) = adapter_world::kinetix::plugin::host_storage::get(&key) {
+            if let Ok(project_id) = String::from_utf8(bytes) {
+                let project_id = project_id.trim();
+                if !project_id.is_empty() {
+                    if !provider
+                        .get("_kinetix")
+                        .is_some_and(serde_json::Value::is_object)
+                    {
+                        provider["_kinetix"] = serde_json::json!({});
+                    }
+                    provider["_kinetix"]["project_id"] = serde_json::json!(project_id);
+                }
+            }
+        }
+    }
+
+    provider.to_string()
+}
+
 impl adapter_world::exports::provider_adapter::Guest for Component {
     fn wire_format() -> String {
         crate::adapter::wire_format()
@@ -871,6 +1188,7 @@ impl adapter_world::exports::provider_adapter::Guest for Component {
         provider_json: String,
         model_json: String,
     ) -> Result<String, adapter_world::kinetix::plugin::types::PluginError> {
+        let provider_json = provider_with_account_project(&provider_json);
         crate::adapter::build_body(&request_json, &provider_json, &model_json).map_err(adapter_err)
     }
     fn classify_error(
@@ -899,6 +1217,57 @@ export!(Component with_types_in kinetix_plugin_sdk);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_cloud_code_project_shapes() {
+        assert_eq!(
+            extract_project_id(&serde_json::json!({
+                "cloudaicompanionProject": "project-one"
+            }))
+            .as_deref(),
+            Some("project-one")
+        );
+        assert_eq!(
+            extract_project_id(&serde_json::json!({
+                "cloudaicompanionProject": { "id": "project-two" }
+            }))
+            .as_deref(),
+            Some("project-two")
+        );
+        assert_eq!(
+            extract_project_id(&serde_json::json!({
+                "response": {
+                    "cloudaicompanionProject": { "id": "project-three" }
+                }
+            }))
+            .as_deref(),
+            Some("project-three")
+        );
+    }
+
+    #[test]
+    fn selects_default_cloud_code_tier() {
+        let value = serde_json::json!({
+            "allowedTiers": [
+                { "id": "other", "isDefault": false },
+                { "id": "g1-pro-tier", "isDefault": true }
+            ]
+        });
+        assert_eq!(default_tier_id(&value), "g1-pro-tier");
+        assert_eq!(default_tier_id(&serde_json::json!({})), "legacy-tier");
+    }
+
+    #[test]
+    fn project_storage_keys_are_account_scoped() {
+        assert_ne!(
+            project_state_key("provider", "account-a"),
+            project_state_key("provider", "account-b")
+        );
+        assert_eq!(
+            project_state_key("provider", "account-a"),
+            format!("project:{}", account_handle("provider", "account-a"))
+        );
+    }
 
     #[test]
     fn parses_fetch_available_models_object_shape() {
