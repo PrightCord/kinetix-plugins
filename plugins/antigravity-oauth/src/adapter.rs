@@ -1267,7 +1267,7 @@ mod tests {
 
         assert!(validate_canonical_extras(&provider, &req).is_ok());
         assert_eq!(session_id(&req), "sess-1");
-        assert_eq!(project_id(&provider, &req), "project-1");
+        assert_eq!(project_id(&provider, &req).unwrap(), "project-1");
     }
 
     #[test]
