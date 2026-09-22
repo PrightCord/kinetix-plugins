@@ -1226,10 +1226,7 @@ mod tests {
         let req = json!({
             "extra": { "antigravity_project": "client-project" }
         });
-        assert_eq!(
-            project_id(&provider, &req).unwrap(),
-            "provisioned-project"
-        );
+        assert_eq!(project_id(&provider, &req).unwrap(), "provisioned-project");
     }
 
     #[test]
@@ -1248,7 +1245,9 @@ mod tests {
     fn project_id_fails_without_real_identity() {
         let error = project_id(&json!({}), &json!({})).unwrap_err();
         assert_eq!(error.code, "invalid_configuration");
-        assert!(error.message.contains("no provisioned Google Cloud project ID"));
+        assert!(error
+            .message
+            .contains("no provisioned Google Cloud project ID"));
     }
 
     #[test]
