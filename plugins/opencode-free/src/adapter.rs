@@ -433,6 +433,7 @@ fn finish_event(reason: &str) -> Value {
     json!({"type":"finish","reason":reason})
 }
 
+
 fn parse_chat(value: &Value) -> Vec<Value> {
     let mut events = Vec::new();
 
@@ -449,6 +450,36 @@ fn parse_chat(value: &Value) -> Vec<Value> {
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
                 if !text.is_empty() {
                     events.push(json!({"type":"text_delta","text":text}));
+                }
+            }
+
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    let index = tool_call
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let id = tool_call.get("id").and_then(Value::as_str);
+                    let function = tool_call.get("function").unwrap_or(&Value::Null);
+                    let name = function.get("name").and_then(Value::as_str);
+                    let arguments = function.get("arguments").and_then(Value::as_str);
+
+                    if id.is_some() || name.is_some() {
+                        events.push(json!({
+                            "type":"tool_call_start",
+                            "index":index,
+                            "id":id,
+                            "name":name.unwrap_or(""),
+                            "signature":Value::Null
+                        }));
+                    }
+                    if let Some(args) = arguments.filter(|args| !args.is_empty()) {
+                        events.push(json!({
+                            "type":"tool_call_args_delta",
+                            "index":index,
+                            "args":args
+                        }));
+                    }
                 }
             }
         }
@@ -472,6 +503,7 @@ fn parse_chat(value: &Value) -> Vec<Value> {
     events
 }
 
+
 fn parse_responses(value: &Value) -> Vec<Value> {
     let mut events = Vec::new();
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -486,6 +518,44 @@ fn parse_responses(value: &Value) -> Vec<Value> {
                 events.push(json!({"type":"text_delta","text":delta}));
             }
         }
+        "response.output_item.added" => {
+            let Some(item) = value.get("item") else {
+                return events;
+            };
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                let index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let id = item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("id").and_then(Value::as_str));
+                let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                events.push(json!({
+                    "type":"tool_call_start",
+                    "index":index,
+                    "id":id,
+                    "name":name,
+                    "signature":Value::Null
+                }));
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    let index = value
+                        .get("output_index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    events.push(json!({
+                        "type":"tool_call_args_delta",
+                        "index":index,
+                        "args":delta
+                    }));
+                }
+            }
+        }
         "response.completed" => {
             if let Some(usage) = value.pointer("/response/usage") {
                 events.push(json!({
@@ -496,7 +566,18 @@ fn parse_responses(value: &Value) -> Vec<Value> {
                     "thinking":usage.pointer("/output_tokens_details/reasoning_tokens").and_then(Value::as_u64)
                 }));
             }
-            events.push(json!({"type":"finish","reason":"stop"}));
+            let has_tool_calls = value
+                .pointer("/response/output")
+                .and_then(Value::as_array)
+                .is_some_and(|output| {
+                    output.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                });
+            events.push(json!({
+                "type":"finish",
+                "reason":if has_tool_calls { "tool_calls" } else { "stop" }
+            }));
         }
         _ => {}
     }
@@ -524,6 +605,7 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
     Ok(Value::Array(events).to_string())
 }
 
+pub 
 pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
     let value: Value = serde_json::from_str(body_json)
         .map_err(|e| err("protocol_error", format!("invalid response JSON: {e}")))?;
@@ -536,11 +618,40 @@ pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
         || value.get("output").is_some()
     {
         let mut events = Vec::new();
+        let mut has_tool_calls = false;
         if let Some(id) = value.get("id").and_then(Value::as_str) {
             events.push(json!({"type":"start","upstream_request_id":id}));
         }
         if let Some(output) = value.get("output").and_then(Value::as_array) {
-            for item in output {
+            for (index, item) in output.iter().enumerate() {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    has_tool_calls = true;
+                    let id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("id").and_then(Value::as_str));
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    events.push(json!({
+                        "type":"tool_call_start",
+                        "index":index,
+                        "id":id,
+                        "name":name,
+                        "signature":Value::Null
+                    }));
+                    if let Some(args) = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .filter(|args| !args.is_empty())
+                    {
+                        events.push(json!({
+                            "type":"tool_call_args_delta",
+                            "index":index,
+                            "args":args
+                        }));
+                    }
+                    continue;
+                }
+
                 if let Some(content) = item.get("content").and_then(Value::as_array) {
                     for block in content {
                         if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -552,7 +663,21 @@ pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
                 }
             }
         }
-        events.push(json!({"type":"finish","reason":"stop"}));
+        if let Some(usage) = value.get("usage") {
+            if !usage.is_null() {
+                events.push(json!({
+                    "type":"usage",
+                    "input":usage.get("input_tokens").and_then(Value::as_u64),
+                    "output":usage.get("output_tokens").and_then(Value::as_u64),
+                    "cached":usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_u64),
+                    "thinking":usage.pointer("/output_tokens_details/reasoning_tokens").and_then(Value::as_u64)
+                }));
+            }
+        }
+        events.push(json!({
+            "type":"finish",
+            "reason":if has_tool_calls { "tool_calls" } else { "stop" }
+        }));
         return Ok(Value::Array(events).to_string());
     }
 
@@ -615,6 +740,132 @@ mod tests {
             .unwrap()
             .iter()
             .any(|event| event["type"] == "text_delta"));
+    }
+
+    #[test]
+    fn parses_chat_stream_tool_calls_across_chunks() {
+        let first: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"id":"chatcmpl-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{\"path\":"}},{"index":1,"id":"call_b","type":"function","function":{"name":"bash","arguments":"{\"cmd\":"}}]},"finish_reason":null}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let first = first.as_array().unwrap();
+
+        assert!(first.iter().any(|event| {
+            event["type"] == "tool_call_start"
+                && event["index"] == 0
+                && event["id"] == "call_a"
+                && event["name"] == "read"
+        }));
+        assert!(first.iter().any(|event| {
+            event["type"] == "tool_call_start"
+                && event["index"] == 1
+                && event["id"] == "call_b"
+                && event["name"] == "bash"
+        }));
+        assert!(first.iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 0
+                && event["args"] == "{\"path\":"
+        }));
+        assert!(first.iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 1
+                && event["args"] == "{\"cmd\":"
+        }));
+
+        let second: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"README.md\"}"}},{"index":1,"function":{"arguments":"\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let second = second.as_array().unwrap();
+
+        assert!(second.iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 0
+                && event["args"] == "\"README.md\"}"
+        }));
+        assert!(second.iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 1
+                && event["args"] == "\"pwd\"}"
+        }));
+        assert!(second.iter().any(|event| {
+            event["type"] == "finish" && event["reason"] == "tool_calls"
+        }));
+    }
+
+    #[test]
+    fn parses_responses_function_call_stream() {
+        let added: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(added.as_array().unwrap().iter().any(|event| {
+            event["type"] == "tool_call_start"
+                && event["index"] == 2
+                && event["id"] == "call_1"
+                && event["name"] == "read"
+        }));
+
+        let delta: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_1","delta":"{\"path\":\"README" }"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(delta.as_array().unwrap().iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 2
+                && event["args"] == "{\"path\":\"README"
+        }));
+
+        let completed: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":10,"output_tokens":4}}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(completed.as_array().unwrap().iter().any(|event| {
+            event["type"] == "finish" && event["reason"] == "tool_calls"
+        }));
+    }
+
+    #[test]
+    fn parses_full_responses_function_calls() {
+        let out: Value = serde_json::from_str(
+            &parse_full_response(
+                r#"{"id":"resp_1","object":"response","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"bash","arguments":"{\"cmd\":\"pwd\"}"}],"usage":{"input_tokens":7,"output_tokens":3}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let events = out.as_array().unwrap();
+
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool_call_start"
+                && event["index"] == 0
+                && event["id"] == "call_1"
+                && event["name"] == "bash"
+        }));
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool_call_args_delta"
+                && event["index"] == 0
+                && event["args"] == "{\"cmd\":\"pwd\"}"
+        }));
+        assert!(events.iter().any(|event| {
+            event["type"] == "finish" && event["reason"] == "tool_calls"
+        }));
     }
 
     #[test]
