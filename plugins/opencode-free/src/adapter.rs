@@ -3,6 +3,8 @@
 //! Kinetix core owns HTTP transport and SSE framing. This module only performs
 //! request/response translation.
 
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
 pub(crate) const USER_AGENT: &str = "opencode/1.18.31";
@@ -171,6 +173,74 @@ fn request_model(req: &Value, model: &Value) -> String {
         .to_string()
 }
 
+fn required_non_empty_part_str<'a>(
+    part: &'a Value,
+    field: &str,
+    location: &str,
+) -> Result<&'a str, AdapterError> {
+    part.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            err(
+                "invalid_request",
+                format!("{location} requires a non-empty {field}"),
+            )
+        })
+}
+
+fn validate_tool_history(req: &Value) -> Result<(), AdapterError> {
+    let mut tool_call_ids = HashSet::new();
+    let Some(messages) = req.get("messages").and_then(Value::as_array) else {
+        return Ok(());
+    };
+
+    for (message_index, message) in messages.iter().enumerate() {
+        let Some(parts) = message.get("parts").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for (part_index, part) in parts.iter().enumerate() {
+            let location = format!("messages[{message_index}].parts[{part_index}]");
+            match part.get("type").and_then(Value::as_str) {
+                Some("tool_call") => {
+                    let id = required_non_empty_part_str(
+                        part,
+                        "id",
+                        &format!("{location} assistant tool_call"),
+                    )?;
+                    if !tool_call_ids.insert(id.to_string()) {
+                        return Err(err(
+                            "invalid_request",
+                            format!(
+                                "{location} duplicate tool_call id '{id}' makes tool-result matching ambiguous"
+                            ),
+                        ));
+                    }
+                }
+                Some("tool_result") => {
+                    let tool_call_id = required_non_empty_part_str(
+                        part,
+                        "tool_call_id",
+                        &format!("{location} tool_result"),
+                    )?;
+                    if !tool_call_ids.contains(tool_call_id) {
+                        return Err(err(
+                            "invalid_request",
+                            format!(
+                                "{location} tool_result references unknown tool_call_id '{tool_call_id}'"
+                            ),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_required_chat_tools(body: &mut Value) {
     let Some(obj) = body.as_object_mut() else {
         return;
@@ -250,10 +320,65 @@ fn build_chat_body(req: &Value, model: &Value) -> Value {
                 .and_then(Value::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            messages.push(json!({
-                "role": role,
-                "content": text_from_parts(parts)
-            }));
+
+            match role {
+                "assistant" => {
+                    let text = text_from_parts(parts);
+                    let content = if text.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(text)
+                    };
+                    let tool_calls: Vec<Value> = parts
+                        .iter()
+                        .filter(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("tool_call")
+                        })
+                        .map(|part| {
+                            json!({
+                                "id": part.get("id").and_then(Value::as_str).unwrap_or(""),
+                                "type": "function",
+                                "function": {
+                                    "name": part.get("name").and_then(Value::as_str).unwrap_or(""),
+                                    "arguments": part.get("arguments").and_then(Value::as_str).unwrap_or("")
+                                }
+                            })
+                        })
+                        .collect();
+
+                    let mut out = json!({"role": "assistant", "content": content});
+                    if !tool_calls.is_empty() {
+                        out["tool_calls"] = Value::Array(tool_calls);
+                    }
+                    messages.push(out);
+                }
+                "tool" => {
+                    for part in parts {
+                        if part.get("type").and_then(Value::as_str) != Some("tool_result") {
+                            continue;
+                        }
+                        let mut out = json!({
+                            "role": "tool",
+                            "tool_call_id": part.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
+                            "content": part.get("content").and_then(Value::as_str).unwrap_or("")
+                        });
+                        if let Some(name) = part
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                        {
+                            out["name"] = json!(name);
+                        }
+                        messages.push(out);
+                    }
+                }
+                _ => {
+                    messages.push(json!({
+                        "role": role,
+                        "content": text_from_parts(parts)
+                    }));
+                }
+            }
         }
     }
 
@@ -314,18 +439,51 @@ fn build_responses_body(req: &Value, model: &Value) -> Value {
     if let Some(messages) = req.get("messages").and_then(Value::as_array) {
         for msg in messages {
             let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
-            let mut content = Vec::new();
-            if let Some(parts) = msg.get("parts").and_then(Value::as_array) {
-                for part in parts {
-                    if part.get("type").and_then(Value::as_str) == Some("text") {
-                        content.push(json!({
-                            "type": if role == "assistant" { "output_text" } else { "input_text" },
-                            "text": part.get("text").and_then(Value::as_str).unwrap_or("")
+            let parts = msg
+                .get("parts")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            match role {
+                "assistant" => {
+                    let text = text_from_parts(parts);
+                    if !text.is_empty() {
+                        input.push(json!({
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}]
                         }));
                     }
+                    for part in parts {
+                        if part.get("type").and_then(Value::as_str) == Some("tool_call") {
+                            input.push(json!({
+                                "type": "function_call",
+                                "call_id": part.get("id").and_then(Value::as_str).unwrap_or(""),
+                                "name": part.get("name").and_then(Value::as_str).unwrap_or(""),
+                                "arguments": part.get("arguments").and_then(Value::as_str).unwrap_or("")
+                            }));
+                        }
+                    }
+                }
+                "tool" => {
+                    for part in parts {
+                        if part.get("type").and_then(Value::as_str) == Some("tool_result") {
+                            input.push(json!({
+                                "type": "function_call_output",
+                                "call_id": part.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
+                                "output": part.get("content").and_then(Value::as_str).unwrap_or("")
+                            }));
+                        }
+                    }
+                }
+                _ => {
+                    let text = text_from_parts(parts);
+                    input.push(json!({
+                        "role": role,
+                        "content": [{"type": "input_text", "text": text}]
+                    }));
                 }
             }
-            input.push(json!({"role": role, "content": content}));
         }
     }
 
@@ -366,6 +524,7 @@ pub fn build_body(
 ) -> Result<String, AdapterError> {
     let req: Value = serde_json::from_str(request_json)
         .map_err(|e| err("bad_request", format!("bad request json: {e}")))?;
+    validate_tool_history(&req)?;
     let model: Value = serde_json::from_str(model_json)
         .map_err(|e| err("bad_request", format!("bad model json: {e}")))?;
     let id = request_model(&req, &model);
@@ -689,6 +848,22 @@ pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
 mod tests {
     use super::*;
 
+    fn chat_body(messages: Value) -> Result<Value, AdapterError> {
+        let request = serde_json::json!({
+            "requested_model": "mimo-v2.5-free",
+            "system": [],
+            "messages": messages,
+            "tools": [],
+            "stream": true
+        });
+        let body = build_body(
+            &request.to_string(),
+            "{}",
+            r#"{"upstream_id":"mimo-v2.5-free"}"#,
+        )?;
+        Ok(serde_json::from_str(&body).expect("adapter body must be valid JSON"))
+    }
+
     #[test]
     fn chooses_endpoint_by_model_family() {
         let provider = r#"{"base_url":"https://opencode.ai"}"#;
@@ -725,6 +900,176 @@ mod tests {
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"read"));
         assert_eq!(out["stream"], true);
+    }
+
+    #[test]
+    fn chat_body_preserves_valid_sequential_tool_history() {
+        let out = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_1","name":"read","arguments":"{\"path\":\"a\"}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"call_1","name":"read","content":"one","is_error":false}
+            ]},
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_2","name":"read","arguments":"{\"path\":\"b\"}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"call_2","name":"read","content":"two","is_error":false}
+            ]}
+        ]))
+        .unwrap();
+
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[1]["tool_call_id"], "call_1");
+        assert_eq!(messages[2]["tool_calls"][0]["id"], "call_2");
+        assert_eq!(messages[3]["tool_call_id"], "call_2");
+    }
+
+    #[test]
+    fn chat_body_rejects_empty_tool_call_id() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_1","name":"read","arguments":"{}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"","name":"read","content":"x","is_error":false}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("non-empty tool_call_id"));
+    }
+
+    #[test]
+    fn chat_body_rejects_missing_tool_call_id() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_1","name":"read","arguments":"{}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","name":"read","content":"x","is_error":false}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("non-empty tool_call_id"));
+    }
+
+    #[test]
+    fn chat_body_rejects_unknown_tool_call_id() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_1","name":"read","arguments":"{}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"call_missing","name":"read","content":"x","is_error":false}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("unknown tool_call_id 'call_missing'"));
+    }
+
+    #[test]
+    fn chat_body_rejects_duplicate_tool_call_ids() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_1","name":"read","arguments":"{}","signature":null},
+                {"type":"tool_call","id":"call_1","name":"bash","arguments":"{}","signature":null}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("duplicate tool_call id 'call_1'"));
+    }
+
+    #[test]
+    fn chat_body_rejects_missing_assistant_tool_call_id() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","name":"read","arguments":"{}","signature":null}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("assistant tool_call"));
+        assert!(err.message.contains("non-empty id"));
+    }
+
+    #[test]
+    fn chat_body_rejects_empty_assistant_tool_call_id() {
+        let err = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"","name":"read","arguments":"{}","signature":null}
+            ]}
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("assistant tool_call"));
+        assert!(err.message.contains("non-empty id"));
+    }
+
+    #[test]
+    fn chat_body_preserves_parallel_tool_calls_and_results() {
+        let out = chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"tool_call","id":"call_a","name":"read","arguments":"{\"path\":\"a\"}","signature":null},
+                {"type":"tool_call","id":"call_b","name":"bash","arguments":"{\"cmd\":\"pwd\"}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"call_a","name":"read","content":"A","is_error":false},
+                {"type":"tool_result","tool_call_id":"call_b","name":"bash","content":"B","is_error":false}
+            ]}
+        ]))
+        .unwrap();
+
+        let messages = out["messages"].as_array().unwrap();
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "call_a");
+        assert_eq!(calls[1]["id"], "call_b");
+        assert_eq!(messages[1]["tool_call_id"], "call_a");
+        assert_eq!(messages[2]["tool_call_id"], "call_b");
+    }
+
+    #[test]
+    fn responses_body_preserves_tool_call_identity() {
+        let request = serde_json::json!({
+            "requested_model": "muse-spark-1.3-contributor-free",
+            "system": [],
+            "messages": [
+                {"role":"assistant","parts":[
+                    {"type":"tool_call","id":"call_resp","name":"read","arguments":"{\"path\":\"README.md\"}","signature":null}
+                ]},
+                {"role":"tool","parts":[
+                    {"type":"tool_result","tool_call_id":"call_resp","name":"read","content":"ok","is_error":false}
+                ]}
+            ],
+            "tools": [],
+            "stream": true
+        });
+        let out: Value = serde_json::from_str(
+            &build_body(
+                &request.to_string(),
+                "{}",
+                r#"{"upstream_id":"muse-spark-1.3-contributor-free"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(out["input"][0]["type"], "function_call");
+        assert_eq!(out["input"][0]["call_id"], "call_resp");
+        assert_eq!(out["input"][1]["type"], "function_call_output");
+        assert_eq!(out["input"][1]["call_id"], "call_resp");
     }
 
     #[test]
