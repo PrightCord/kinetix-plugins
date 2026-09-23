@@ -1,6 +1,6 @@
 [package]
 name = "kinetix-plugin-opencode-free"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Kinetix plugin: OpenCode Free no-auth provider adapter and dynamic model discovery."
 license = "MIT"
