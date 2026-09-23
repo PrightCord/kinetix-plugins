@@ -22,6 +22,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run plugin unit tests
         run: cargo test --workspace
+      - name: Validate response contract fixtures
+        run: |
+          python3 -m pip install --disable-pip-version-check --quiet jsonschema==4.25.1
+          python3 scripts/validate_response_contract.py
       - name: Check plugin workspace
         run: cargo check --locked --workspace --target wasm32-unknown-unknown
       - name: Validate catalog JSON
