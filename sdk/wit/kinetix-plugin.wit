@@ -278,10 +278,12 @@ world plugin-adapter {
     build-body: func(request-json: string, provider-json: string, model-json: string) -> result<string, plugin-error>;
     /// Return JSON of the classified failure evidence.
     classify-error: func(status: u16, body: string, headers-json: string) -> result<string, plugin-error>;
-    /// Parse one upstream SSE `data:` payload into JSON array of canonical
-    /// stream events.
+    /// Parse one upstream SSE `data:` payload into a versioned
+    /// `kinetix.plugin.response` JSON envelope (`schema_version = 1`)
+    /// containing canonical stream events.
     parse-stream-chunk: func(data: string) -> result<string, plugin-error>;
-    /// Parse a full non-streaming body into JSON array of canonical events.
+    /// Parse a full non-streaming body into the same versioned canonical
+    /// response/event envelope.
     parse-full-response: func(body-json: string) -> result<string, plugin-error>;
   }
 }

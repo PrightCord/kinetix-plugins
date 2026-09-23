@@ -1,0 +1,15 @@
+{
+  "schema": "kinetix.plugin.response",
+  "schema_version": 1,
+  "events": [
+    {
+      "type": "error",
+      "kind": "server_error",
+      "message": "failed"
+    },
+    {
+      "type": "text_delta",
+      "text": "late"
+    }
+  ]
+}

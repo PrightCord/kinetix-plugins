@@ -1,0 +1,15 @@
+{
+  "schema": "kinetix.plugin.response",
+  "schema_version": 1,
+  "events": [
+    {
+      "type": "warning",
+      "code": "provider_notice",
+      "message": "deprecated upstream field"
+    },
+    {
+      "type": "text_delta",
+      "text": "ok"
+    }
+  ]
+}
