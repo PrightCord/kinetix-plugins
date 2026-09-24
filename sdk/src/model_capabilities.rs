@@ -76,8 +76,7 @@ impl ModelCapabilitiesV1 {
     }
 
     pub fn from_json(value: &str) -> Result<Self, CapabilityMetadataError> {
-        let metadata: Self =
-            serde_json::from_str(value).map_err(CapabilityMetadataError::Json)?;
+        let metadata: Self = serde_json::from_str(value).map_err(CapabilityMetadataError::Json)?;
         metadata.validate()?;
         Ok(metadata)
     }
