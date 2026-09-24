@@ -61,6 +61,9 @@ fn rejects_invalid_or_unknown_v1_metadata() {
         r#"{"schema_version":1,"reasoning":{"supported":true,"mode":"level","levels":["low"],"default":"high"}}"#,
         r#"{"schema_version":1,"reasoning":{"supported":true,"mode":"level","levels":["ultra"]}}"#,
     ] {
-        assert!(ModelCapabilitiesV1::from_json(invalid).is_err(), "{invalid}");
+        assert!(
+            ModelCapabilitiesV1::from_json(invalid).is_err(),
+            "{invalid}"
+        );
     }
 }
