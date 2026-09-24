@@ -1,0 +1,36 @@
+manifest_version = 1
+id = "dev.kinetix.ai-studio"
+name = "Google AI Studio"
+version = "0.1.0"
+plugin_api = "1"
+
+[provides]
+account_model_sources = ["ai-studio-models"]
+
+[[integrations]]
+id = "ai-studio"
+name = "Google AI Studio"
+description = "Use Google AI Studio with native Gemini transport and live model discovery."
+model_source = "ai-studio-models"
+
+[integrations.provider]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+wire_format = "gemini"
+auth_scheme = "custom_header"
+custom_header_name = "x-goog-api-key"
+models_path = "/models?pageSize=1000"
+timeout_ms = 120000
+capability_mode = "permissive"
+follow_redirects = false
+
+[permissions]
+network_hosts = ["generativelanguage.googleapis.com"]
+credential_scopes = ["*"]
+credential_read = true
+
+[limits]
+memory = "32MiB"
+wall_time_ms = 10000
+max_outbound_requests = 2
+max_http_body = "2MiB"
+storage = "64KiB"

@@ -16,6 +16,8 @@ pub struct ModelCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<SupportCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<SupportCapability>,
@@ -23,6 +25,10 @@ pub struct ModelCapabilitiesV1 {
     pub vision: Option<VisionCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<SupportCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prices: Option<serde_json::Value>,
 }
 
 impl Default for ModelCapabilitiesV1 {
@@ -30,10 +36,13 @@ impl Default for ModelCapabilitiesV1 {
         Self {
             schema_version: MODEL_CAPABILITIES_SCHEMA_VERSION,
             transport: None,
+            text: None,
             reasoning: None,
             tools: None,
             vision: None,
             structured_output: None,
+            modalities: None,
+            prices: None,
         }
     }
 }
@@ -41,10 +50,13 @@ impl Default for ModelCapabilitiesV1 {
 impl ModelCapabilitiesV1 {
     pub fn is_empty(&self) -> bool {
         self.transport.is_none()
+            && self.text.is_none()
             && self.reasoning.is_none()
             && self.tools.is_none()
             && self.vision.is_none()
             && self.structured_output.is_none()
+            && self.modalities.is_none()
+            && self.prices.is_none()
     }
 
     pub fn validate(&self) -> Result<(), CapabilityMetadataError> {
@@ -65,6 +77,36 @@ impl ModelCapabilitiesV1 {
 
         if let Some(reasoning) = &self.reasoning {
             reasoning.validate()?;
+        }
+
+        if let Some(prices) = &self.prices {
+            let prices = prices.as_object().ok_or_else(|| {
+                CapabilityMetadataError::validation("prices must be a JSON object")
+            })?;
+            for key in [
+                "input_per_1m",
+                "output_per_1m",
+                "cached_per_1m",
+                "cache_write_per_1m",
+                "thinking_per_1m",
+            ] {
+                let Some(value) = prices.get(key) else {
+                    continue;
+                };
+                if value.is_null() {
+                    continue;
+                }
+                let Some(value) = value.as_f64() else {
+                    return Err(CapabilityMetadataError::validation(format!(
+                        "prices.{key} must be a non-negative number or null"
+                    )));
+                };
+                if !value.is_finite() || value < 0.0 {
+                    return Err(CapabilityMetadataError::validation(format!(
+                        "prices.{key} must be a non-negative finite number or null"
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -298,3 +340,35 @@ impl fmt::Display for CapabilityMetadataError {
 }
 
 impl std::error::Error for CapabilityMetadataError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pricing_round_trips_through_v1_envelope() {
+        let mut capabilities = ModelCapabilitiesV1::default();
+        capabilities.prices = Some(serde_json::json!({
+            "input_per_1m": 0.0,
+            "output_per_1m": 0.0,
+            "cached_per_1m": 0.0,
+            "cache_write_per_1m": 0.0,
+            "thinking_per_1m": 0.0
+        }));
+
+        let encoded = capabilities.to_json().unwrap();
+        let decoded = ModelCapabilitiesV1::from_json(&encoded).unwrap();
+
+        assert_eq!(decoded.prices, capabilities.prices);
+    }
+
+    #[test]
+    fn invalid_prices_are_rejected_by_sdk_producers() {
+        let mut capabilities = ModelCapabilitiesV1::default();
+        capabilities.prices = Some(serde_json::json!({
+            "input_per_1m": -1.0
+        }));
+
+        assert!(capabilities.to_json().is_err());
+    }
+}
