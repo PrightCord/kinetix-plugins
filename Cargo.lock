@@ -66,6 +66,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "kinetix-plugin-ai-studio"
+version = "0.1.0"
+dependencies = [
+ "kinetix-plugin-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kinetix-plugin-b-ai"
+version = "0.1.0"
+dependencies = [
+ "kinetix-plugin-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kinetix-plugin-antigravity-oauth"
 version = "0.1.6"
 dependencies = [
@@ -85,15 +103,16 @@ dependencies = [
 
 [[package]]
 name = "kinetix-plugin-opencode-free"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "kinetix-plugin-sdk",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "kinetix-plugin-sdk"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",

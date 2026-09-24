@@ -1,8 +1,8 @@
 [package]
-name = "kinetix-plugin-opencode-free"
-version = "0.1.6"
+name = "kinetix-plugin-ai-studio"
+version = "0.1.0"
 edition = "2021"
-description = "Kinetix plugin: OpenCode Free no-auth provider adapter and dynamic model discovery."
+description = "Kinetix plugin: Google AI Studio setup and live model discovery."
 license = "MIT"
 repository = "https://github.com/PrightCord/kinetix-plugins"
 

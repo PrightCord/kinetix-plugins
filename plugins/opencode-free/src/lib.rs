@@ -9,8 +9,11 @@
 use kinetix::plugin::types::*;
 use kinetix_plugin_sdk::{
     export, exports, kinetix,
-    model_capabilities::{ModelCapabilitiesV1, TransportCapability},
+    model_capabilities::{
+        ModelCapabilitiesV1, ReasoningCapability, SupportCapability, TransportCapability,
+    },
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 mod adapter;
@@ -18,6 +21,41 @@ mod adapter;
 const DEFAULT_BASE_URL: &str = "https://opencode.ai";
 const DEFAULT_MODELS_PATH: &str = "/zen/v1/models";
 const CLIENT_HEADER_VALUE: &str = "desktop";
+const MODEL_CATALOG: &str = include_str!("../models.json");
+
+#[derive(Clone, Debug, Deserialize)]
+struct Catalog {
+    models: Vec<CatalogEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CatalogEntry {
+    ids: Vec<String>,
+    display_name: Option<String>,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    reasoning: Option<CatalogReasoning>,
+    tools: Option<bool>,
+    structured_output: Option<bool>,
+    #[serde(rename = "source")]
+    _source: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CatalogReasoning {
+    supported: bool,
+    mode: Option<String>,
+    can_disable: Option<bool>,
+}
+
+fn catalog_entry(id: &str) -> Result<Option<CatalogEntry>, String> {
+    let catalog: Catalog = serde_json::from_str(MODEL_CATALOG)
+        .map_err(|error| format!("invalid models.json: {error}"))?;
+    Ok(catalog
+        .models
+        .into_iter()
+        .find(|entry| entry.ids.iter().any(|known| known == id)))
+}
 
 const KNOWN_FREE_IDS: &[&str] = &[
     "big-pickle",
@@ -32,6 +70,36 @@ const DEAD_FREE_IDS: &[&str] = &[
 ];
 
 struct Component;
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(not(test))]
+fn send_discovery_request(req: &HttpRequest) -> Result<HttpResponse, PluginError> {
+    kinetix::plugin::host_http::send(req).map_err(|error| PluginError {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        retry_after: error.retry_after,
+        reset_at: error.reset_at,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DISCOVERY_RESPONSE: RefCell<Option<HttpResponse>> = const { RefCell::new(None) };
+    static TEST_DISCOVERY_REQUEST: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn send_discovery_request(req: &HttpRequest) -> Result<HttpResponse, PluginError> {
+    TEST_DISCOVERY_REQUEST.with(|slot| *slot.borrow_mut() = Some(req.url.clone()));
+    TEST_DISCOVERY_RESPONSE.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .ok_or_else(|| discovery_error("plugin_internal", "missing test response", false))
+    })
+}
 
 fn unsupported() -> PluginError {
     kinetix_plugin_sdk::helpers::error("unknown", "capability not provided by this plugin")
@@ -79,9 +147,35 @@ fn target_format(id: &str) -> &'static str {
     }
 }
 
-fn normalized_capabilities(id: &str) -> Result<String, PluginError> {
+fn normalized_capabilities(id: &str, entry: Option<&CatalogEntry>) -> Result<String, PluginError> {
     let mut capabilities = ModelCapabilitiesV1::default();
     capabilities.transport = Some(TransportCapability::new(target_format(id)));
+    capabilities.prices = Some(serde_json::json!({
+        "input_per_1m": 0.0,
+        "output_per_1m": 0.0,
+        "cached_per_1m": 0.0,
+        "cache_write_per_1m": 0.0,
+        "thinking_per_1m": 0.0
+    }));
+    if let Some(entry) = entry {
+        capabilities.reasoning = entry.reasoning.as_ref().map(|reasoning| {
+            if !reasoning.supported {
+                ReasoningCapability::unsupported()
+            } else if reasoning.mode.as_deref() == Some("toggle") {
+                ReasoningCapability {
+                    supported: true,
+                    mode: Some(kinetix_plugin_sdk::model_capabilities::ReasoningMode::Toggle),
+                    levels: None,
+                    default: None,
+                    can_disable: reasoning.can_disable,
+                }
+            } else {
+                ReasoningCapability::supported_unknown()
+            }
+        });
+        capabilities.tools = entry.tools.map(SupportCapability::new);
+        capabilities.structured_output = entry.structured_output.map(SupportCapability::new);
+    }
     capabilities.to_json().map_err(|error| {
         discovery_error(
             "plugin_internal",
@@ -105,13 +199,16 @@ fn parse_model_list(value: &Value) -> Result<Vec<DiscoveredModel>, PluginError> 
             continue;
         }
 
+        let entry =
+            catalog_entry(id).map_err(|error| discovery_error("plugin_internal", error, false))?;
         let display_name = item
             .get("name")
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
-            .unwrap_or(id)
-            .to_string();
-        let capabilities_json = normalized_capabilities(id)?;
+            .map(str::to_string)
+            .or_else(|| entry.as_ref().and_then(|entry| entry.display_name.clone()))
+            .unwrap_or_else(|| id.to_string());
+        let capabilities_json = normalized_capabilities(id, entry.as_ref())?;
 
         models.push(DiscoveredModel {
             id: id.to_string(),
@@ -119,11 +216,13 @@ fn parse_model_list(value: &Value) -> Result<Vec<DiscoveredModel>, PluginError> 
             context_window: item
                 .get("context_length")
                 .or_else(|| item.get("contextWindow"))
-                .and_then(Value::as_u64),
+                .and_then(Value::as_u64)
+                .or_else(|| entry.as_ref().and_then(|entry| entry.context_window)),
             max_output_tokens: item
                 .get("max_output_tokens")
                 .or_else(|| item.get("maxOutputTokens"))
-                .and_then(Value::as_u64),
+                .and_then(Value::as_u64)
+                .or_else(|| entry.as_ref().and_then(|entry| entry.max_output_tokens)),
             capabilities_json: Some(capabilities_json),
             raw_metadata: serde_json::to_string(item).ok(),
         });
@@ -152,13 +251,7 @@ impl exports::model_source::Guest for Component {
             credential: None,
         };
 
-        let resp = kinetix::plugin::host_http::send(&req).map_err(|e| PluginError {
-            code: e.code,
-            message: e.message,
-            retryable: e.retryable,
-            retry_after: e.retry_after,
-            reset_at: e.reset_at,
-        })?;
+        let resp = send_discovery_request(&req)?;
 
         if resp.body_truncated {
             return Err(discovery_error(
@@ -322,6 +415,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discovery_export_keeps_live_availability_authoritative() {
+        TEST_DISCOVERY_RESPONSE.with(|slot| {
+            *slot.borrow_mut() = Some(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: serde_json::json!({
+                    "data": [
+                        {"id": "big-pickle"},
+                        {"id": "mimo-v2.6-flash-free"}
+                    ]
+                })
+                .to_string()
+                .into_bytes(),
+                body_truncated: false,
+            });
+        });
+
+        let models = <Component as exports::model_source::Guest>::discover(
+            "provider-1".into(),
+            "".into(),
+            "".into(),
+        )
+        .unwrap();
+
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["big-pickle", "mimo-v2.6-flash-free"]);
+        TEST_DISCOVERY_REQUEST.with(|slot| {
+            assert_eq!(
+                slot.borrow().as_deref(),
+                Some("https://opencode.ai/zen/v1/models")
+            );
+        });
+    }
+
+    #[test]
     fn parses_live_openai_model_list_shape_and_filters_to_free() {
         let value = serde_json::json!({
             "object": "list",
@@ -329,7 +457,12 @@ mod tests {
                 {"id": "gpt-5.6-luna", "object": "model", "owned_by": "opencode"},
                 {"id": "big-pickle", "object": "model", "owned_by": "opencode"},
                 {"id": "mimo-v2.5-free", "object": "model", "owned_by": "opencode"},
-                {"id": "muse-spark-1.3-contributor-free", "object": "model", "owned_by": "opencode"},
+                {"id": "mimo-v2.6-flash-free", "object": "model", "owned_by": "opencode"},
+                {
+                    "id": "muse-spark-1.3-contributor-free",
+                    "object": "model",
+                    "owned_by": "opencode"
+                },
                 {"id": "deepseek-v4-flash-free", "object": "model", "owned_by": "opencode"}
             ]
         });
@@ -342,6 +475,7 @@ mod tests {
             vec![
                 "big-pickle",
                 "mimo-v2.5-free",
+                "mimo-v2.6-flash-free",
                 "muse-spark-1.3-contributor-free"
             ]
         );
@@ -370,6 +504,89 @@ mod tests {
                 .map(|transport| transport.format.as_str()),
             Some("openai-responses")
         );
+    }
+
+    #[test]
+    fn enriches_mimo_v26_flash_free_only_when_discovered_live() {
+        let value = serde_json::json!({
+            "data": [{"id": "mimo-v2.6-flash-free", "object": "model"}]
+        });
+
+        let models = parse_model_list(&value).unwrap();
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!(model.context_window, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(128_000));
+
+        let caps =
+            ModelCapabilitiesV1::from_json(model.capabilities_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            caps.reasoning.as_ref().map(|reasoning| reasoning.supported),
+            Some(true)
+        );
+        assert_eq!(
+            caps.reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.can_disable),
+            Some(true)
+        );
+        assert_eq!(caps.tools.as_ref().map(|tools| tools.supported), Some(true));
+        assert_eq!(
+            caps.structured_output
+                .as_ref()
+                .map(|structured| structured.supported),
+            Some(true)
+        );
+        assert_eq!(
+            caps.prices,
+            Some(serde_json::json!({
+                "input_per_1m": 0.0,
+                "output_per_1m": 0.0,
+                "cached_per_1m": 0.0,
+                "cache_write_per_1m": 0.0,
+                "thinking_per_1m": 0.0
+            }))
+        );
+    }
+
+    #[test]
+    fn every_free_model_overrides_all_price_dimensions_with_zero() {
+        let value = serde_json::json!({
+            "data": [
+                {"id": "big-pickle"},
+                {"id": "mimo-v2.6-flash-free"}
+            ]
+        });
+
+        for model in parse_model_list(&value).unwrap() {
+            let capabilities =
+                ModelCapabilitiesV1::from_json(model.capabilities_json.as_deref().unwrap())
+                    .unwrap();
+            assert_eq!(
+                capabilities.prices,
+                Some(serde_json::json!({
+                    "input_per_1m": 0.0,
+                    "output_per_1m": 0.0,
+                    "cached_per_1m": 0.0,
+                    "cache_write_per_1m": 0.0,
+                    "thinking_per_1m": 0.0
+                })),
+                "{} must override every lower-priority catalog price",
+                model.id
+            );
+        }
+    }
+
+    #[test]
+    fn local_catalog_does_not_resurrect_removed_models() {
+        let value = serde_json::json!({
+            "data": [{"id": "big-pickle", "object": "model"}]
+        });
+        let models = parse_model_list(&value).unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(models
+            .iter()
+            .all(|model| model.id != "mimo-v2.6-flash-free"));
     }
 
     #[test]

@@ -32,6 +32,16 @@ OpenCode returns the standard OpenAI list shape:
 
 The plugin never treats the full endpoint catalog as free. Only explicitly free ids are returned.
 
+## Provider-specific metadata
+
+Live discovery remains authoritative. `models.json` only enriches a model after OpenCode returns it, so a removed SKU is never resurrected by the local catalog.
+
+`mimo-v2.6-flash-free` is enriched from sourced MiMo V2.6 Flash metadata for context/output limits, thinking support, tools, and structured output. Fields the plugin cannot source confidently remain unknown.
+
+## Pricing
+
+Every model returned by this plugin is an explicitly free OpenCode model, so discovery emits zero input, output, cache-read, cache-write, and thinking prices through the v1 metadata envelope. Live discovery still controls availability.
+
 ## Build
 
 ```sh

@@ -1,0 +1,35 @@
+manifest_version = 1
+id = "dev.kinetix.b-ai"
+name = "B.AI"
+version = "0.1.0"
+plugin_api = "1"
+
+[provides]
+account_model_sources = ["b-ai-models"]
+
+[[integrations]]
+id = "b-ai"
+name = "B.AI"
+description = "Use B.AI's OpenAI-compatible API with live model discovery."
+model_source = "b-ai-models"
+
+[integrations.provider]
+base_url = "https://api.b.ai/v1"
+wire_format = "openai"
+auth_scheme = "bearer"
+models_path = "/models"
+timeout_ms = 120000
+capability_mode = "permissive"
+follow_redirects = false
+
+[permissions]
+network_hosts = ["api.b.ai"]
+credential_scopes = ["*"]
+credential_read = false
+
+[limits]
+memory = "32MiB"
+wall_time_ms = 10000
+max_outbound_requests = 2
+max_http_body = "2MiB"
+storage = "64KiB"

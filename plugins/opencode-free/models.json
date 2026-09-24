@@ -1,0 +1,18 @@
+{
+  "models": [
+    {
+      "ids": ["mimo-v2.6-flash-free"],
+      "display_name": "MiMo V2.6 Flash Free",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "reasoning": {
+        "supported": true,
+        "mode": "toggle",
+        "can_disable": true
+      },
+      "tools": true,
+      "structured_output": true,
+      "source": "https://mimo.mi.com/models/en-US/mimo-v2.6-flash"
+    }
+  ]
+}
