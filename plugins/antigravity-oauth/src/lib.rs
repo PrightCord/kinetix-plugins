@@ -1971,6 +1971,35 @@ mod tests {
     }
 
     #[test]
+    fn preserves_max_reasoning_level() {
+        let value = serde_json::json!({
+            "models": {
+                "reasoning-model": {
+                    "capabilities": {
+                        "reasoning": {
+                            "supported": true,
+                            "mode": "level",
+                            "levels": ["low", "max"],
+                            "default": "max",
+                            "can_disable": false
+                        }
+                    }
+                }
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        let capabilities =
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let reasoning = capabilities.reasoning.unwrap();
+        assert_eq!(
+            reasoning.levels,
+            Some(vec![ReasoningLevel::Low, ReasoningLevel::Max])
+        );
+        assert_eq!(reasoning.default, Some(ReasoningLevel::Max));
+    }
+
+    #[test]
     fn parses_fetch_available_models_array_shape() {
         let json_str = r#"{
             "models": [
