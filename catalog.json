@@ -1,6 +1,52 @@
 {
   "schema_version": 1,
-  "plugins": [
+  "plugins": [ 
+    {
+      "id": "dev.kinetix.ai-studio",
+      "name": "Google AI Studio",
+      "description": "Google AI Studio provider setup and authenticated live Gemini model discovery.",
+      "publisher": "Kinetix",
+      "official": true,
+      "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/ai-studio",
+      "latest_version": "0.1.0",
+      "artifact_name": "dev.kinetix.ai-studio-0.1.0.kxp",
+      "capabilities": [
+        "model_source"
+      ],
+      "installable": true,
+      "distribution": {
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/ai-studio-v0.1.0/dev.kinetix.ai-studio-0.1.0.kxp",
+        "sha256": "32a8daf98423c531121781bd7ad0389474bb5cee255a66df2a1bb4fbbad2305f",
+        "publisher_key_id": "kinetix-official-v1",
+        "allowed_hosts": [
+          "github.com",
+          "objects.githubusercontent.com"
+        ]
+      }
+    },
+    {
+      "id": "dev.kinetix.b-ai",
+      "name": "B.AI",
+      "description": "B.AI OpenAI-compatible provider setup, authenticated live discovery, and provider-specific model metadata.",
+      "publisher": "Kinetix",
+      "official": true,
+      "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/b-ai",
+      "latest_version": "0.1.0",
+      "artifact_name": "dev.kinetix.b-ai-0.1.0.kxp",
+      "capabilities": [
+        "model_source"
+      ],
+      "installable": true,
+      "distribution": {
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/b-ai-v0.1.0/dev.kinetix.b-ai-0.1.0.kxp",
+        "sha256": "7e620db9517bed7c3123abef9f44c1270d6e5ebd70beacfaa99f85c3cc61ed58",
+        "publisher_key_id": "kinetix-official-v1",
+        "allowed_hosts": [
+          "github.com",
+          "objects.githubusercontent.com"
+        ]
+      }
+    },
     {
       "id": "dev.kinetix.antigravity-oauth",
       "name": "Google Antigravity",
@@ -57,16 +103,16 @@
       "publisher": "Kinetix",
       "official": true,
       "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/opencode-free",
-      "latest_version": "0.1.5",
-      "artifact_name": "dev.kinetix.opencode-free-0.1.5.kxp",
+      "latest_version": "0.1.6",
+      "artifact_name": "dev.kinetix.opencode-free-0.1.6.kxp",
       "capabilities": [
         "model_source",
         "provider_adapter"
       ],
       "installable": true,
       "distribution": {
-        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/opencode-free-v0.1.5/dev.kinetix.opencode-free-0.1.5.kxp",
-        "sha256": "1cc5bf8e83f662d8af4076380cd7e9c6018024a36094a96594fad570b5b78c87",
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/opencode-free-v0.1.6/dev.kinetix.opencode-free-0.1.6.kxp",
+        "sha256": "7c9cb23f8f859e364e176dd8248f20ddd15900476dc029f8f0c3115ef720db1e",
         "publisher_key_id": "kinetix-official-v1",
         "allowed_hosts": [
           "github.com",
