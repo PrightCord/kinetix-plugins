@@ -7,8 +7,11 @@
 //! returned OpenAI-style model list down to free-tier ids.
 
 use kinetix::plugin::types::*;
-use kinetix_plugin_sdk::{export, exports, kinetix};
-use serde_json::{json, Value};
+use kinetix_plugin_sdk::{
+    export, exports, kinetix,
+    model_capabilities::{ModelCapabilitiesV1, TransportCapability},
+};
+use serde_json::Value;
 
 mod adapter;
 
@@ -76,52 +79,58 @@ fn target_format(id: &str) -> &'static str {
     }
 }
 
-fn parse_model_list(value: &Value) -> Vec<DiscoveredModel> {
+fn normalized_capabilities(id: &str) -> Result<String, PluginError> {
+    let mut capabilities = ModelCapabilitiesV1::default();
+    capabilities.transport = Some(TransportCapability::new(target_format(id)));
+    capabilities.to_json().map_err(|error| {
+        discovery_error(
+            "plugin_internal",
+            format!("invalid normalized model capabilities: {error}"),
+            false,
+        )
+    })
+}
+
+fn parse_model_list(value: &Value) -> Result<Vec<DiscoveredModel>, PluginError> {
     let Some(data) = value.get("data").and_then(Value::as_array) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
-    let mut models: Vec<DiscoveredModel> = data
-        .iter()
-        .filter_map(|item| {
-            let id = item.get("id")?.as_str()?.trim();
-            if id.is_empty() || !is_free_model(id) {
-                return None;
-            }
+    let mut models = Vec::new();
+    for item in data {
+        let Some(id) = item.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() || !is_free_model(id) {
+            continue;
+        }
 
-            let display_name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .unwrap_or(id)
-                .to_string();
-
-            let capabilities_json = json!({
-                "target_format": target_format(id),
-                "free": true,
-                "auth": "none"
-            })
+        let display_name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(id)
             .to_string();
+        let capabilities_json = normalized_capabilities(id)?;
 
-            Some(DiscoveredModel {
-                id: id.to_string(),
-                display_name: Some(display_name),
-                context_window: item
-                    .get("context_length")
-                    .or_else(|| item.get("contextWindow"))
-                    .and_then(Value::as_u64),
-                max_output_tokens: item
-                    .get("max_output_tokens")
-                    .or_else(|| item.get("maxOutputTokens"))
-                    .and_then(Value::as_u64),
-                capabilities_json: Some(capabilities_json),
-                raw_metadata: serde_json::to_string(item).ok(),
-            })
-        })
-        .collect();
+        models.push(DiscoveredModel {
+            id: id.to_string(),
+            display_name: Some(display_name),
+            context_window: item
+                .get("context_length")
+                .or_else(|| item.get("contextWindow"))
+                .and_then(Value::as_u64),
+            max_output_tokens: item
+                .get("max_output_tokens")
+                .or_else(|| item.get("maxOutputTokens"))
+                .and_then(Value::as_u64),
+            capabilities_json: Some(capabilities_json),
+            raw_metadata: serde_json::to_string(item).ok(),
+        });
+    }
 
     models.sort_by(|a, b| a.id.cmp(&b.id));
-    models
+    Ok(models)
 }
 
 impl exports::model_source::Guest for Component {
@@ -188,7 +197,7 @@ impl exports::model_source::Guest for Component {
             )
         })?;
 
-        let models = parse_model_list(&value);
+        let models = parse_model_list(&value)?;
         if models.is_empty() {
             return Err(discovery_error(
                 "protocol_error",
@@ -325,7 +334,7 @@ mod tests {
             ]
         });
 
-        let models = parse_model_list(&value);
+        let models = parse_model_list(&value).unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
 
         assert_eq!(
@@ -347,13 +356,18 @@ mod tests {
             ]
         });
 
-        let models = parse_model_list(&value);
+        let models = parse_model_list(&value).unwrap();
         let muse = models
             .iter()
             .find(|m| m.id.starts_with("muse-spark"))
             .unwrap();
-        let caps: Value = serde_json::from_str(muse.capabilities_json.as_deref().unwrap()).unwrap();
-        assert_eq!(caps["target_format"], "openai-responses");
+        let caps =
+            ModelCapabilitiesV1::from_json(muse.capabilities_json.as_deref().unwrap()).unwrap();
+        assert_eq!(caps.schema_version, 1);
+        assert_eq!(
+            caps.transport.as_ref().map(|transport| transport.format.as_str()),
+            Some("openai-responses")
+        );
     }
 
     #[test]

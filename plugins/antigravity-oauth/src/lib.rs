@@ -26,7 +26,13 @@
 mod adapter;
 
 use kinetix::plugin::types::*;
-use kinetix_plugin_sdk::{export, exports, kinetix};
+use kinetix_plugin_sdk::{
+    export, exports, kinetix,
+    model_capabilities::{
+        ModelCapabilitiesV1, ReasoningCapability, ReasoningLevel, ReasoningMode,
+        SupportCapability, VisionCapability,
+    },
+};
 
 #[cfg(test)]
 use std::{
@@ -1235,13 +1241,131 @@ fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginErro
     Ok(())
 }
 
-fn normalize_model(id: String, info: &serde_json::Value) -> Option<ModelDiscoveredModel> {
+fn capability_flag(raw: &serde_json::Value, names: &[&str]) -> Option<bool> {
+    if let Some(items) = raw.as_array() {
+        return items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|item| names.contains(&item))
+            .then_some(true);
+    }
+
+    let object = raw.as_object()?;
+    for name in names {
+        let Some(value) = object.get(*name) else {
+            continue;
+        };
+        if let Some(supported) = value.as_bool() {
+            return Some(supported);
+        }
+        if let Some(supported) = value
+            .get("supported")
+            .and_then(serde_json::Value::as_bool)
+        {
+            return Some(supported);
+        }
+    }
+    None
+}
+
+fn normalized_reasoning(raw: &serde_json::Value) -> Option<ReasoningCapability> {
+    if let Some(items) = raw.as_array() {
+        return items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|item| item == "reasoning")
+            .then(ReasoningCapability::supported_unknown);
+    }
+
+    let value = raw.as_object()?.get("reasoning")?;
+    if let Some(supported) = value.as_bool() {
+        return Some(if supported {
+            ReasoningCapability::supported_unknown()
+        } else {
+            ReasoningCapability::unsupported()
+        });
+    }
+
+    let object = value.as_object()?;
+    let supported = object.get("supported")?.as_bool()?;
+    if !supported {
+        return Some(ReasoningCapability::unsupported());
+    }
+
+    let can_disable = object
+        .get("can_disable")
+        .or_else(|| object.get("canDisable"))
+        .and_then(serde_json::Value::as_bool);
+    let mut reasoning = ReasoningCapability::supported_unknown();
+    reasoning.can_disable = can_disable;
+
+    match object.get("mode").and_then(serde_json::Value::as_str) {
+        Some("toggle") => {
+            reasoning.mode = Some(ReasoningMode::Toggle);
+        }
+        Some("level") => {
+            let levels: Vec<ReasoningLevel> = object
+                .get("levels")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(ReasoningLevel::parse)
+                .collect();
+            if !levels.is_empty() {
+                reasoning.mode = Some(ReasoningMode::Level);
+                reasoning.default = object
+                    .get("default")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(ReasoningLevel::parse)
+                    .filter(|default| levels.contains(default));
+                reasoning.levels = Some(levels);
+            }
+        }
+        _ => {}
+    }
+
+    Some(reasoning)
+}
+
+fn normalized_model_capabilities(
+    info: &serde_json::Value,
+) -> Result<Option<String>, ModelPluginError> {
+    let Some(raw) = info.get("capabilities") else {
+        return Ok(None);
+    };
+
+    let mut capabilities = ModelCapabilitiesV1::default();
+    capabilities.reasoning = normalized_reasoning(raw);
+    capabilities.tools = capability_flag(raw, &["tools"]).map(SupportCapability::new);
+    capabilities.vision = capability_flag(raw, &["vision"]).map(VisionCapability::new);
+    capabilities.structured_output =
+        capability_flag(raw, &["structured_output", "structured-output"])
+            .map(SupportCapability::new);
+
+    if capabilities.is_empty() {
+        return Ok(None);
+    }
+
+    capabilities.to_json().map(Some).map_err(|error| {
+        model_error(
+            "plugin_internal",
+            format!("invalid normalized model capabilities: {error}"),
+            false,
+        )
+    })
+}
+
+fn normalize_model(
+    id: String,
+    info: &serde_json::Value,
+) -> Result<Option<ModelDiscoveredModel>, ModelPluginError> {
     if info
         .get("isInternal")
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
     {
-        return None;
+        return Ok(None);
     }
 
     let display_name = info
@@ -1259,50 +1383,55 @@ fn normalize_model(id: String, info: &serde_json::Value) -> Option<ModelDiscover
         .get("maxOutputTokens")
         .or_else(|| info.get("outputTokenLimit"))
         .and_then(|value| value.as_u64());
-    let capabilities_json = info
-        .get("capabilities")
-        .and_then(|value| serde_json::to_string(value).ok());
+    let capabilities_json = normalized_model_capabilities(info)?;
     let raw_metadata = serde_json::to_string(info).ok();
 
-    Some(ModelDiscoveredModel {
+    Ok(Some(ModelDiscoveredModel {
         id,
         display_name,
         context_window,
         max_output_tokens,
         capabilities_json,
         raw_metadata,
-    })
+    }))
 }
 
-fn parse_model_catalog(value: &serde_json::Value) -> Vec<ModelDiscoveredModel> {
+fn parse_model_catalog(
+    value: &serde_json::Value,
+) -> Result<Vec<ModelDiscoveredModel>, ModelPluginError> {
     let Some(models) = value.get("models") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
+    let mut discovered = Vec::new();
     if let Some(object) = models.as_object() {
-        return object
-            .iter()
-            .filter_map(|(id, info)| normalize_model(id.clone(), info))
-            .collect();
+        for (id, info) in object {
+            if let Some(model) = normalize_model(id.clone(), info)? {
+                discovered.push(model);
+            }
+        }
+        return Ok(discovered);
     }
 
     if let Some(array) = models.as_array() {
-        return array
-            .iter()
-            .filter_map(|info| {
-                let id = info
-                    .get("id")
-                    .or_else(|| info.get("model"))
-                    .or_else(|| info.get("name"))
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())?
-                    .to_string();
-                normalize_model(id, info)
-            })
-            .collect();
+        for info in array {
+            let Some(id) = info
+                .get("id")
+                .or_else(|| info.get("model"))
+                .or_else(|| info.get("name"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            if let Some(model) = normalize_model(id, info)? {
+                discovered.push(model);
+            }
+        }
     }
 
-    Vec::new()
+    Ok(discovered)
 }
 
 impl model_world::exports::account_model_source::Guest for Component {
@@ -1373,7 +1502,7 @@ impl model_world::exports::account_model_source::Guest for Component {
                 false,
             )
         })?;
-        Ok(parse_model_catalog(&value))
+        parse_model_catalog(&value)
     }
 }
 
@@ -1803,7 +1932,7 @@ mod tests {
         }"#;
 
         let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let mut models = parse_model_catalog(&val);
+        let mut models = parse_model_catalog(&val).unwrap();
         models.sort_by(|a, b| a.id.cmp(&b.id));
 
         assert_eq!(models.len(), 2);
@@ -1812,12 +1941,34 @@ mod tests {
         assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.5 Flash"));
         assert_eq!(models[0].context_window, Some(1048576));
         assert_eq!(models[0].max_output_tokens, Some(65536));
-        assert!(models[0].capabilities_json.is_some());
+        let capabilities =
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap()).unwrap();
+        assert_eq!(capabilities.tools, Some(SupportCapability::new(true)));
+        assert!(capabilities.reasoning.is_none());
 
         assert_eq!(models[1].id, "gemini-2.5-pro");
         assert_eq!(models[1].display_name.as_deref(), Some("Gemini 2.5 Pro"));
         assert_eq!(models[1].context_window, Some(2097152));
         assert_eq!(models[1].max_output_tokens, Some(65536));
+    }
+
+    #[test]
+    fn reasoning_flag_does_not_invent_levels() {
+        let value = serde_json::json!({
+            "models": {
+                "reasoning-model": {
+                    "capabilities": { "reasoning": true }
+                }
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        let capabilities =
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap()).unwrap();
+        let reasoning = capabilities.reasoning.unwrap();
+        assert!(reasoning.supported);
+        assert!(reasoning.mode.is_none());
+        assert!(reasoning.levels.is_none());
+        assert!(reasoning.default.is_none());
     }
 
     #[test]
@@ -1844,7 +1995,7 @@ mod tests {
         }"#;
 
         let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let models = parse_model_catalog(&val);
+        let models = parse_model_catalog(&val).unwrap();
 
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "gemini-3-flash");
@@ -1860,12 +2011,12 @@ mod tests {
     #[test]
     fn handles_empty_or_missing_catalog() {
         let val = serde_json::json!({});
-        assert!(parse_model_catalog(&val).is_empty());
+        assert!(parse_model_catalog(&val).unwrap().is_empty());
 
         let val = serde_json::json!({ "models": null });
-        assert!(parse_model_catalog(&val).is_empty());
+        assert!(parse_model_catalog(&val).unwrap().is_empty());
 
         let val = serde_json::json!({ "models": [] });
-        assert!(parse_model_catalog(&val).is_empty());
+        assert!(parse_model_catalog(&val).unwrap().is_empty());
     }
 }
