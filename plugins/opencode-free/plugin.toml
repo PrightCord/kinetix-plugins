@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.opencode-free"
 name = "OpenCode Free"
-version = "0.1.4"
+version = "0.1.5"
 plugin_api = "1"
 
 [provides]

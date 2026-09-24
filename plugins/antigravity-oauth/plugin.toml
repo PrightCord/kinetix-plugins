@@ -1,7 +1,7 @@
 manifest_version = 1
 id = "dev.kinetix.antigravity-oauth"
 name = "Antigravity OAuth"
-version = "0.1.5"
+version = "0.1.6"
 plugin_api = "1"
 
 # Antigravity accounts are provisioned by a host-managed refresh-token exchange
@@ -14,6 +14,7 @@ credential_strategies = ["antigravity-oauth"]
 auth_flows = ["antigravity"]
 account_model_sources = ["antigravity-models"]
 provider_adapters = ["antigravity"]
+thinking_translation = true
 
 [[integrations]]
 id = "antigravity"

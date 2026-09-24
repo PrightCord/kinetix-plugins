@@ -65,6 +65,8 @@ pub mod prelude {
     pub use crate::bindings::{exports, kinetix};
     pub use crate::export;
     pub use crate::helpers::*;
+    pub use crate::model_capabilities::*;
 }
 
 pub mod helpers;
+pub mod model_capabilities;
