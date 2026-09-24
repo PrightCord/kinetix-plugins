@@ -1643,6 +1643,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn manifest_opts_in_to_thinking_translation() {
+        let manifest = include_str!("../plugin.toml");
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.trim() == "thinking_translation = true")
+        );
+    }
+
+    #[test]
     fn access_token_well_before_expiry_is_valid() {
         let now = 1_800_000_000_000;
         let cred = Credential {
