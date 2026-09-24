@@ -29,8 +29,8 @@ use kinetix::plugin::types::*;
 use kinetix_plugin_sdk::{
     export, exports, kinetix,
     model_capabilities::{
-        ModelCapabilitiesV1, ReasoningCapability, ReasoningLevel, ReasoningMode,
-        SupportCapability, VisionCapability,
+        ModelCapabilitiesV1, ReasoningCapability, ReasoningLevel, ReasoningMode, SupportCapability,
+        VisionCapability,
     },
 };
 
@@ -1258,10 +1258,7 @@ fn capability_flag(raw: &serde_json::Value, names: &[&str]) -> Option<bool> {
         if let Some(supported) = value.as_bool() {
             return Some(supported);
         }
-        if let Some(supported) = value
-            .get("supported")
-            .and_then(serde_json::Value::as_bool)
-        {
+        if let Some(supported) = value.get("supported").and_then(serde_json::Value::as_bool) {
             return Some(supported);
         }
     }
@@ -1942,7 +1939,8 @@ mod tests {
         assert_eq!(models[0].context_window, Some(1048576));
         assert_eq!(models[0].max_output_tokens, Some(65536));
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap()).unwrap();
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
         assert_eq!(capabilities.tools, Some(SupportCapability::new(true)));
         assert!(capabilities.reasoning.is_none());
 
@@ -1963,7 +1961,8 @@ mod tests {
         });
         let models = parse_model_catalog(&value).unwrap();
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap()).unwrap();
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
         let reasoning = capabilities.reasoning.unwrap();
         assert!(reasoning.supported);
         assert!(reasoning.mode.is_none());
