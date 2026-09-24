@@ -75,8 +75,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "kinetix-plugin-b-ai"
-version = "0.1.0"
+name = "kinetix-plugin-antigravity-oauth"
+version = "0.1.6"
 dependencies = [
  "kinetix-plugin-sdk",
  "serde",
@@ -84,8 +84,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "kinetix-plugin-antigravity-oauth"
-version = "0.1.6"
+name = "kinetix-plugin-b-ai"
+version = "0.1.0"
 dependencies = [
  "kinetix-plugin-sdk",
  "serde",
