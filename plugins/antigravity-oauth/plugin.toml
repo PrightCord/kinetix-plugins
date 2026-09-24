@@ -14,6 +14,7 @@ credential_strategies = ["antigravity-oauth"]
 auth_flows = ["antigravity"]
 account_model_sources = ["antigravity-models"]
 provider_adapters = ["antigravity"]
+thinking_translation = true
 
 [[integrations]]
 id = "antigravity"
