@@ -365,7 +365,9 @@ mod tests {
             ModelCapabilitiesV1::from_json(muse.capabilities_json.as_deref().unwrap()).unwrap();
         assert_eq!(caps.schema_version, 1);
         assert_eq!(
-            caps.transport.as_ref().map(|transport| transport.format.as_str()),
+            caps.transport
+                .as_ref()
+                .map(|transport| transport.format.as_str()),
             Some("openai-responses")
         );
     }
