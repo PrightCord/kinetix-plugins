@@ -139,6 +139,8 @@ pub enum ReasoningLevel {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
+    #[serde(rename = "max")]
+    Max,
 }
 
 impl ReasoningLevel {
@@ -149,6 +151,7 @@ impl ReasoningLevel {
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
