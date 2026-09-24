@@ -28,6 +28,12 @@ mod adapter;
 use kinetix::plugin::types::*;
 use kinetix_plugin_sdk::{export, exports, kinetix};
 
+#[cfg(test)]
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+};
+
 /// Google OAuth endpoints used by browser authorization and refresh.
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -64,7 +70,7 @@ fn default_client_secret() -> String {
 }
 
 /// Refresh a token this many ms before its stated expiry.
-const REFRESH_LEAD_MS: i64 = 5 * 60 * 1000;
+const REFRESH_LEAD_MS: u64 = 5 * 60 * 1000;
 /// KV key prefix where the live access token is written for the host.
 const LEASE_KEY_PREFIX: &str = "lease:";
 
@@ -85,6 +91,193 @@ struct Credential {
 
 struct Component;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshError {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+    retry_after: Option<u64>,
+}
+
+impl RefreshError {
+    fn credential_expired(message: impl Into<String>) -> Self {
+        Self {
+            code: "credential_expired",
+            message: message.into(),
+            retryable: false,
+            retry_after: None,
+        }
+    }
+
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            code: "upstream_unavailable",
+            message: message.into(),
+            retryable: true,
+            retry_after: Some(5),
+        }
+    }
+
+    fn terminal(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable: false,
+            retry_after: None,
+        }
+    }
+
+    fn into_plugin_error(self) -> PluginError {
+        if self.retryable {
+            kinetix_plugin_sdk::helpers::retryable_error(self.code, self.message, self.retry_after)
+        } else {
+            kinetix_plugin_sdk::helpers::error(self.code, self.message)
+        }
+    }
+}
+
+fn token_refresh_transport_error(code: &str, message: &str) -> RefreshError {
+    RefreshError::retryable(format!("{code}: {message}"))
+}
+
+fn token_refresh_http_error(status: u16, body: &str) -> RefreshError {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let oauth_error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|value| value.as_str());
+    let description = parsed
+        .as_ref()
+        .and_then(|value| value.get("error_description"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+
+    if oauth_error == Some("invalid_grant") {
+        return RefreshError::credential_expired(
+            description
+                .unwrap_or("Google rejected the refresh token as invalid or expired")
+                .to_string(),
+        );
+    }
+
+    let detail = oauth_error
+        .map(|error| {
+            description
+                .map(|description| format!("{error}: {description}"))
+                .unwrap_or_else(|| error.to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("HTTP {status}"));
+
+    if status == 429 || status >= 500 {
+        RefreshError::retryable(format!("token endpoint returned {detail}"))
+    } else {
+        RefreshError::terminal(
+            "protocol_error",
+            format!("token endpoint returned {detail}"),
+        )
+    }
+}
+
+fn latest_credential_from_sources(
+    imported_raw: &str,
+    persisted_raw: Option<&str>,
+) -> Result<Credential, String> {
+    let raw = persisted_raw.unwrap_or(imported_raw);
+    serde_json::from_str(raw).map_err(|e| format!("invalid Antigravity credential JSON: {e}"))
+}
+
+#[cfg(not(test))]
+fn credential_storage_get(key: &str) -> Option<String> {
+    kinetix_plugin_sdk::helpers::kv_get_string(key)
+}
+
+#[cfg(not(test))]
+fn credential_storage_put(key: &str, value: &str) -> Result<(), String> {
+    kinetix_plugin_sdk::helpers::kv_put_string(key, value)
+}
+
+#[cfg(not(test))]
+fn imported_credential_read(account: &AccountRef) -> Result<String, PluginError> {
+    let cred_ref = CredentialRef::Account(account.clone());
+    kinetix::plugin::host_credential::read(&cred_ref)
+        .map_err(|e| kinetix_plugin_sdk::helpers::error("credential_expired", e.message))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CREDENTIAL_STORAGE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static TEST_IMPORTED_CREDENTIALS: RefCell<HashMap<String, String>> =
+        RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+fn test_account_key(account: &AccountRef) -> String {
+    format!("{}:{}", account.provider_id, account.account_id)
+}
+
+#[cfg(test)]
+fn credential_storage_get(key: &str) -> Option<String> {
+    TEST_CREDENTIAL_STORAGE.with(|storage| storage.borrow().get(key).cloned())
+}
+
+#[cfg(test)]
+fn credential_storage_put(key: &str, value: &str) -> Result<(), String> {
+    TEST_CREDENTIAL_STORAGE.with(|storage| {
+        storage
+            .borrow_mut()
+            .insert(key.to_string(), value.to_string());
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+fn imported_credential_read(account: &AccountRef) -> Result<String, PluginError> {
+    TEST_IMPORTED_CREDENTIALS
+        .with(|credentials| {
+            credentials
+                .borrow()
+                .get(&test_account_key(account))
+                .cloned()
+        })
+        .ok_or_else(|| {
+            kinetix_plugin_sdk::helpers::error(
+                "credential_expired",
+                "test imported credential missing",
+            )
+        })
+}
+
+#[cfg(test)]
+fn reset_test_credential_state() {
+    TEST_CREDENTIAL_STORAGE.with(|storage| storage.borrow_mut().clear());
+    TEST_IMPORTED_CREDENTIALS.with(|credentials| credentials.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn set_test_imported_credential(account: &AccountRef, raw: &str) {
+    TEST_IMPORTED_CREDENTIALS.with(|credentials| {
+        credentials
+            .borrow_mut()
+            .insert(test_account_key(account), raw.to_string());
+    });
+}
+
+fn load_credential(account: &AccountRef) -> Result<Credential, PluginError> {
+    if let Some(persisted) = credential_storage_get(&state_key(account)) {
+        return latest_credential_from_sources("", Some(&persisted))
+            .map_err(|e| kinetix_plugin_sdk::helpers::error("invalid_configuration", e));
+    }
+
+    let imported = imported_credential_read(account)?;
+    latest_credential_from_sources(&imported, None)
+        .map_err(|e| kinetix_plugin_sdk::helpers::error("invalid_configuration", e))
+}
+
+fn should_refresh_before_lease(cred: &Credential, now_ms: u64) -> bool {
+    !access_token_valid(cred, now_ms)
+}
+
 impl exports::credential_strategy::Guest for Component {
     fn resolve(
         provider_id: String,
@@ -95,25 +288,24 @@ impl exports::credential_strategy::Guest for Component {
             provider_id: provider_id.clone(),
             account_id: account_id.clone(),
         };
-        let cred_ref = CredentialRef::Account(account.clone());
-
-        let raw = kinetix::plugin::host_credential::read(&cred_ref)
-            .map_err(|e| kinetix_plugin_sdk::helpers::error("credential_expired", e.message))?;
-        let mut cred: Credential = serde_json::from_str(&raw).unwrap_or_default();
+        let mut cred = load_credential(&account)?;
 
         let now = kinetix_plugin_sdk::helpers::now_unix_millis();
-        if !access_token_valid(&cred, now) {
+        if should_refresh_before_lease(&cred, now) {
             if cred.refresh_token.is_none() {
                 return Err(kinetix_plugin_sdk::helpers::error(
                     "credential_expired",
                     "Antigravity credential has no refresh_token and its access_token is not valid",
                 ));
             }
-            refresh(&mut cred).map_err(|e| {
-                kinetix_plugin_sdk::helpers::retryable_error("upstream_unavailable", e, Some(5))
+            refresh(&mut cred).map_err(RefreshError::into_plugin_error)?;
+            // Persist before leasing so a rotated refresh token cannot be lost.
+            persist_rotated(&account, &cred).map_err(|e| {
+                kinetix_plugin_sdk::helpers::error(
+                    "plugin_internal",
+                    format!("persisting rotated Antigravity credential: {e}"),
+                )
             })?;
-            // Persist the rotated material so a restart does not lose it.
-            persist_rotated(&account, &cred);
         }
 
         let access = cred.access_token.clone().ok_or_else(|| {
@@ -132,7 +324,12 @@ impl exports::credential_strategy::Guest for Component {
                     kinetix_plugin_sdk::helpers::retryable_error("upstream_unavailable", e, Some(5))
                 })?;
                 cred.project_id = Some(project.clone());
-                persist_rotated(&account, &cred);
+                persist_rotated(&account, &cred).map_err(|e| {
+                    kinetix_plugin_sdk::helpers::error(
+                        "plugin_internal",
+                        format!("persisting Antigravity credential project: {e}"),
+                    )
+                })?;
                 project
             }
         };
@@ -158,13 +355,11 @@ impl exports::credential_strategy::Guest for Component {
     }
 
     fn health(provider_id: String, account_id: String) -> Result<String, PluginError> {
-        let cred_ref = CredentialRef::Account(AccountRef {
+        let account = AccountRef {
             provider_id,
             account_id,
-        });
-        let raw = kinetix::plugin::host_credential::read(&cred_ref)
-            .map_err(|e| kinetix_plugin_sdk::helpers::error("credential_expired", e.message))?;
-        let cred: Credential = serde_json::from_str(&raw).unwrap_or_default();
+        };
+        let cred = load_credential(&account)?;
         let now = kinetix_plugin_sdk::helpers::now_unix_millis();
         if access_token_valid(&cred, now) {
             Ok("healthy".into())
@@ -181,14 +376,14 @@ impl exports::credential_strategy::Guest for Component {
             provider_id,
             account_id,
         };
-        let cred_ref = CredentialRef::Account(account.clone());
-        let raw = kinetix::plugin::host_credential::read(&cred_ref)
-            .map_err(|e| kinetix_plugin_sdk::helpers::error("credential_expired", e.message))?;
-        let mut cred: Credential = serde_json::from_str(&raw).unwrap_or_default();
-        refresh(&mut cred).map_err(|e| {
-            kinetix_plugin_sdk::helpers::retryable_error("upstream_unavailable", e, Some(5))
+        let mut cred = load_credential(&account)?;
+        refresh(&mut cred).map_err(RefreshError::into_plugin_error)?;
+        persist_rotated(&account, &cred).map_err(|e| {
+            kinetix_plugin_sdk::helpers::error(
+                "plugin_internal",
+                format!("persisting rotated Antigravity credential: {e}"),
+            )
         })?;
-        persist_rotated(&account, &cred);
         Ok(())
     }
 }
@@ -202,21 +397,22 @@ fn access_token_valid(cred: &Credential, now_ms: u64) -> bool {
         return false;
     }
     let Some(expiry) = cred.expiry.as_deref() else {
-        // No expiry recorded: assume usable; a 401 will trigger a rotate.
-        return true;
+        // No trustworthy expiry metadata: refresh before leasing rather than
+        // waiting for the host's forced rotation after an upstream 401.
+        return false;
     };
     match parse_rfc3339_ms(expiry) {
-        Some(exp_ms) => (exp_ms - now_ms) > REFRESH_LEAD_MS as u64,
-        None => true,
+        Some(exp_ms) => exp_ms > now_ms.saturating_add(REFRESH_LEAD_MS),
+        None => false,
     }
 }
 
 /// Exchange the refresh token for a fresh access token.
-fn refresh(cred: &mut Credential) -> Result<(), String> {
+fn refresh(cred: &mut Credential) -> Result<(), RefreshError> {
     let refresh_token = cred
         .refresh_token
         .clone()
-        .ok_or_else(|| "no refresh_token".to_string())?;
+        .ok_or_else(|| RefreshError::credential_expired("no refresh_token"))?;
     let form = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
         urlencode(&refresh_token),
@@ -236,21 +432,25 @@ fn refresh(cred: &mut Credential) -> Result<(), String> {
         body: form.into_bytes(),
         credential: None,
     };
-    let resp =
-        kinetix::plugin::host_http::send(&req).map_err(|e| format!("{}: {}", e.code, e.message))?;
+    let resp = kinetix::plugin::host_http::send(&req)
+        .map_err(|e| token_refresh_transport_error(&e.code, &e.message))?;
     if resp.body_truncated {
-        return Err("token response truncated".into());
+        return Err(RefreshError::retryable("token response truncated"));
     }
-    let text = String::from_utf8(resp.body).map_err(|_| "token response not utf-8".to_string())?;
+    let text = String::from_utf8(resp.body)
+        .map_err(|_| RefreshError::terminal("protocol_error", "token response not utf-8"))?;
     if resp.status != 200 {
-        return Err(format!("token endpoint returned HTTP {}", resp.status));
+        return Err(token_refresh_http_error(resp.status, &text));
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("invalid token JSON: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        RefreshError::terminal("protocol_error", format!("invalid token JSON: {e}"))
+    })?;
     let access = v
         .get("access_token")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| "token response missing access_token".to_string())?;
+        .ok_or_else(|| {
+            RefreshError::terminal("protocol_error", "token response missing access_token")
+        })?;
     cred.access_token = Some(access.to_string());
     if let Some(rt) = v.get("refresh_token").and_then(|t| t.as_str()) {
         cred.refresh_token = Some(rt.to_string());
@@ -275,8 +475,12 @@ fn handle_for(account: &AccountRef) -> String {
     account_handle(&account.provider_id, &account.account_id)
 }
 
+fn credential_state_key(provider_id: &str, account_id: &str) -> String {
+    format!("cred:{}", account_handle(provider_id, account_id))
+}
+
 fn state_key(account: &AccountRef) -> String {
-    format!("cred:{}", handle_for(account))
+    credential_state_key(&account.provider_id, &account.account_id)
 }
 
 pub(crate) fn project_state_key(provider_id: &str, account_id: &str) -> String {
@@ -503,16 +707,13 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Persist a freshly rotated credential to host KV. The host encrypts KV at
-/// rest. Concurrent rotations for the same account can interleave (the
-/// single-use refresh token makes a lost update permanent), so callers log the
-/// outcome rather than silently discarding a failure.
-fn persist_rotated(account: &AccountRef, cred: &Credential) {
-    let serialized = serde_json::to_string(cred).unwrap_or_default();
-    if let Err(e) = kinetix_plugin_sdk::helpers::kv_put_string(&state_key(account), &serialized) {
-        kinetix_plugin_sdk::helpers::log_warn(&format!(
-            "failed to persist rotated Antigravity credential: {e}"
-        ));
-    }
+/// rest. A failed write is fatal for the lease because Google may rotate the
+/// refresh token; continuing would make the next resolution fall back to stale
+/// imported state.
+fn persist_rotated(account: &AccountRef, cred: &Credential) -> Result<(), String> {
+    let serialized =
+        serde_json::to_string(cred).map_err(|e| format!("encoding credential state: {e}"))?;
+    credential_storage_put(&state_key(account), &serialized)
 }
 
 // --- Optional account authorization world. ---------------------------------
@@ -848,6 +1049,54 @@ type ModelAccountRef = model_world::kinetix::plugin::types::AccountRef;
 type ModelCredentialRef = model_world::kinetix::plugin::types::CredentialRef;
 type ModelDiscoveredModel = model_world::kinetix::plugin::types::DiscoveredModel;
 
+struct ModelRefreshHttpResponse {
+    status: u16,
+    body: Vec<u8>,
+    body_truncated: bool,
+}
+
+#[cfg(not(test))]
+fn send_model_refresh_request(
+    req: &ModelHttpRequest,
+) -> Result<ModelRefreshHttpResponse, RefreshError> {
+    let response = model_world::kinetix::plugin::host_http::send(req)
+        .map_err(|e| token_refresh_transport_error(&e.code, &e.message))?;
+    Ok(ModelRefreshHttpResponse {
+        status: response.status,
+        body: response.body,
+        body_truncated: response.body_truncated,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MODEL_REFRESH_RESPONSES:
+        RefCell<VecDeque<Result<ModelRefreshHttpResponse, RefreshError>>> =
+        RefCell::new(VecDeque::new());
+}
+
+#[cfg(test)]
+fn send_model_refresh_request(
+    _req: &ModelHttpRequest,
+) -> Result<ModelRefreshHttpResponse, RefreshError> {
+    TEST_MODEL_REFRESH_RESPONSES.with(|responses| {
+        responses
+            .borrow_mut()
+            .pop_front()
+            .expect("missing test model refresh response")
+    })
+}
+
+#[cfg(test)]
+fn enqueue_model_refresh_response(response: Result<ModelRefreshHttpResponse, RefreshError>) {
+    TEST_MODEL_REFRESH_RESPONSES.with(|responses| responses.borrow_mut().push_back(response));
+}
+
+#[cfg(test)]
+fn reset_model_refresh_responses() {
+    TEST_MODEL_REFRESH_RESPONSES.with(|responses| responses.borrow_mut().clear());
+}
+
 const MODEL_CATALOG_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const ANTIGRAVITY_IDE_VERSION: &str = "2.11.0";
@@ -860,6 +1109,58 @@ fn model_error(code: &str, message: impl Into<String>, retryable: bool) -> Model
         retry_after: None,
         reset_at: None,
     }
+}
+
+fn model_refresh_error(error: RefreshError) -> ModelPluginError {
+    ModelPluginError {
+        code: error.code.into(),
+        message: error.message,
+        retryable: error.retryable,
+        retry_after: error.retry_after,
+        reset_at: None,
+    }
+}
+
+fn load_model_credential(account: &ModelAccountRef) -> Result<Credential, ModelPluginError> {
+    let key = credential_state_key(&account.provider_id, &account.account_id);
+    if let Some(bytes) = model_world::kinetix::plugin::host_storage::get(&key) {
+        let persisted = String::from_utf8(bytes).map_err(|_| {
+            model_error(
+                "invalid_configuration",
+                "persisted credential is not utf-8",
+                false,
+            )
+        })?;
+        return latest_credential_from_sources("", Some(&persisted))
+            .map_err(|e| model_error("invalid_configuration", e, false));
+    }
+
+    let credential_ref = ModelCredentialRef::Account(account.clone());
+    let imported = model_world::kinetix::plugin::host_credential::read(&credential_ref)
+        .map_err(|e| model_error(&e.code, e.message, e.retryable))?;
+    latest_credential_from_sources(&imported, None)
+        .map_err(|e| model_error("invalid_configuration", e, false))
+}
+
+fn persist_model_credential(
+    account: &ModelAccountRef,
+    cred: &Credential,
+) -> Result<(), ModelPluginError> {
+    let serialized = serde_json::to_string(cred).map_err(|e| {
+        model_error(
+            "plugin_internal",
+            format!("encoding credential state: {e}"),
+            false,
+        )
+    })?;
+    let key = credential_state_key(&account.provider_id, &account.account_id);
+    model_world::kinetix::plugin::host_storage::put(&key, serialized.as_bytes()).map_err(|e| {
+        model_error(
+            "plugin_internal",
+            format!("persisting credential state: {e}"),
+            false,
+        )
+    })
 }
 
 fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginError> {
@@ -888,23 +1189,19 @@ fn refresh_for_model_source(cred: &mut Credential) -> Result<(), ModelPluginErro
         body: form.into_bytes(),
         credential: None,
     };
-    let resp = model_world::kinetix::plugin::host_http::send(&req)
-        .map_err(|e| model_error(&e.code, e.message, e.retryable))?;
+    let resp = send_model_refresh_request(&req).map_err(model_refresh_error)?;
     if resp.body_truncated {
-        return Err(model_error(
-            "upstream_unavailable",
+        return Err(model_refresh_error(RefreshError::retryable(
             "token response truncated",
-            true,
-        ));
+        )));
     }
     let text = String::from_utf8(resp.body)
         .map_err(|_| model_error("protocol_error", "token response not utf-8", false))?;
     if resp.status != 200 {
-        return Err(model_error(
-            "credential_expired",
-            format!("token endpoint returned HTTP {}", resp.status),
-            false,
-        ));
+        return Err(model_refresh_error(token_refresh_http_error(
+            resp.status,
+            &text,
+        )));
     }
 
     let value: serde_json::Value = serde_json::from_str(&text)
@@ -1023,20 +1320,12 @@ impl model_world::exports::account_model_source::Guest for Component {
             ));
         }
 
-        let credential_ref = ModelCredentialRef::Account(account);
-        let raw = model_world::kinetix::plugin::host_credential::read(&credential_ref)
-            .map_err(|e| model_error(&e.code, e.message, e.retryable))?;
-        let mut credential: Credential = serde_json::from_str(&raw).map_err(|e| {
-            model_error(
-                "invalid_configuration",
-                format!("invalid Antigravity credential JSON: {e}"),
-                false,
-            )
-        })?;
+        let mut credential = load_model_credential(&account)?;
 
         let now = model_world::kinetix::plugin::host_clock::now_unix_millis();
         if !access_token_valid(&credential, now) {
             refresh_for_model_source(&mut credential)?;
+            persist_model_credential(&account, &credential)?;
         }
         let access_token = credential
             .access_token
@@ -1226,6 +1515,219 @@ export!(Component with_types_in kinetix_plugin_sdk);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_token_well_before_expiry_is_valid() {
+        let now = 1_800_000_000_000;
+        let cred = Credential {
+            access_token: Some("access".into()),
+            expiry: Some(format_rfc3339_ms(now + REFRESH_LEAD_MS + 60_000)),
+            ..Default::default()
+        };
+        assert!(access_token_valid(&cred, now));
+    }
+
+    #[test]
+    fn access_token_inside_refresh_window_is_invalid() {
+        let now = 1_800_000_000_000;
+        let cred = Credential {
+            access_token: Some("access".into()),
+            expiry: Some(format_rfc3339_ms(now + REFRESH_LEAD_MS - 1_000)),
+            ..Default::default()
+        };
+        assert!(!access_token_valid(&cred, now));
+    }
+
+    #[test]
+    fn already_expired_access_token_is_invalid_without_underflow() {
+        let now = 1_800_000_000_000;
+        let cred = Credential {
+            access_token: Some("access".into()),
+            expiry: Some(format_rfc3339_ms(now - 60_000)),
+            ..Default::default()
+        };
+        assert!(!access_token_valid(&cred, now));
+    }
+
+    #[test]
+    fn missing_expiry_enters_refresh_path_before_lease() {
+        let cred = Credential {
+            refresh_token: Some("refresh".into()),
+            access_token: Some("access".into()),
+            expiry: None,
+            ..Default::default()
+        };
+        assert!(should_refresh_before_lease(&cred, 1_800_000_000_000));
+    }
+
+    #[test]
+    fn invalid_grant_refresh_failure_is_terminal_credential_expired() {
+        let error = token_refresh_http_error(
+            400,
+            r#"{
+                "error":"invalid_grant",
+                "error_description":"Token has been expired or revoked."
+            }"#,
+        )
+        .into_plugin_error();
+
+        assert_eq!(error.code, "credential_expired");
+        assert!(!error.retryable);
+        assert_eq!(error.retry_after, None);
+        assert!(error.message.contains("expired or revoked"));
+    }
+
+    #[test]
+    fn token_endpoint_server_and_transport_failures_remain_retryable() {
+        let server_error = token_refresh_http_error(
+            503,
+            r#"{
+                "error":"temporarily_unavailable",
+                "error_description":"try again later"
+            }"#,
+        )
+        .into_plugin_error();
+
+        assert_eq!(server_error.code, "upstream_unavailable");
+        assert!(server_error.retryable);
+        assert_eq!(server_error.retry_after, Some(5));
+
+        let transport_error =
+            token_refresh_transport_error("timeout", "connection timed out").into_plugin_error();
+        assert_eq!(transport_error.code, "upstream_unavailable");
+        assert!(transport_error.retryable);
+        assert_eq!(transport_error.retry_after, Some(5));
+    }
+
+    fn model_refresh_credential() -> Credential {
+        Credential {
+            refresh_token: Some("refresh-token".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn model_source_refresh_invalid_grant_is_terminal_credential_expired() {
+        reset_model_refresh_responses();
+        enqueue_model_refresh_response(Ok(ModelRefreshHttpResponse {
+            status: 400,
+            body: br#"{
+                "error":"invalid_grant",
+                "error_description":"Token has been expired or revoked."
+            }"#
+            .to_vec(),
+            body_truncated: false,
+        }));
+
+        let error = refresh_for_model_source(&mut model_refresh_credential()).unwrap_err();
+
+        assert_eq!(error.code, "credential_expired");
+        assert!(!error.retryable);
+        assert_eq!(error.retry_after, None);
+        reset_model_refresh_responses();
+    }
+
+    #[test]
+    fn model_source_refresh_http_failures_are_retryable() {
+        for (status, body) in [
+            (
+                429,
+                br#"{
+                    "error":"rate_limit_exceeded",
+                    "error_description":"try again later"
+                }"#
+                .to_vec(),
+            ),
+            (
+                503,
+                br#"{
+                    "error":"temporarily_unavailable",
+                    "error_description":"try again later"
+                }"#
+                .to_vec(),
+            ),
+        ] {
+            reset_model_refresh_responses();
+            enqueue_model_refresh_response(Ok(ModelRefreshHttpResponse {
+                status,
+                body,
+                body_truncated: false,
+            }));
+
+            let error = refresh_for_model_source(&mut model_refresh_credential()).unwrap_err();
+
+            assert_eq!(error.code, "upstream_unavailable");
+            assert!(error.retryable);
+            assert_eq!(error.retry_after, Some(5));
+        }
+        reset_model_refresh_responses();
+    }
+
+    #[test]
+    fn model_source_refresh_transport_failure_is_retryable() {
+        reset_model_refresh_responses();
+        enqueue_model_refresh_response(Err(token_refresh_transport_error(
+            "timeout",
+            "connection timed out",
+        )));
+
+        let error = refresh_for_model_source(&mut model_refresh_credential()).unwrap_err();
+
+        assert_eq!(error.code, "upstream_unavailable");
+        assert!(error.retryable);
+        assert_eq!(error.retry_after, Some(5));
+        reset_model_refresh_responses();
+    }
+
+    #[test]
+    fn persisted_rotation_is_loaded_on_next_credential_resolution() {
+        reset_test_credential_state();
+        let account = AccountRef {
+            provider_id: "antigravity".into(),
+            account_id: "account-a".into(),
+        };
+        set_test_imported_credential(
+            &account,
+            r#"{
+                "refresh_token":"refresh-old",
+                "access_token":"access-old",
+                "expiry":"2030-01-01T00:00:00Z"
+            }"#,
+        );
+
+        let imported = load_credential(&account).unwrap();
+        assert_eq!(imported.refresh_token.as_deref(), Some("refresh-old"));
+        assert_eq!(imported.access_token.as_deref(), Some("access-old"));
+
+        let rotated = Credential {
+            refresh_token: Some("refresh-rotated".into()),
+            access_token: Some("access-new".into()),
+            expiry: Some("2030-01-01T01:00:00Z".into()),
+            ..Default::default()
+        };
+        persist_rotated(&account, &rotated).unwrap();
+
+        let expected_state_key = format!("cred:{}", handle_for(&account));
+        assert_eq!(state_key(&account), expected_state_key);
+        assert!(
+            credential_storage_get(&expected_state_key).is_some(),
+            "persist_rotated must write cred:<handle> state"
+        );
+        let resolved = load_credential(&account).unwrap();
+        assert_eq!(
+            resolved.refresh_token.as_deref(),
+            Some("refresh-rotated"),
+            "next resolution must use the persisted rotated refresh token"
+        );
+        assert_eq!(
+            resolved.access_token.as_deref(),
+            Some("access-new"),
+            "next resolution must use persisted refreshed access state"
+        );
+        assert_eq!(resolved.expiry.as_deref(), Some("2030-01-01T01:00:00Z"));
+
+        reset_test_credential_state();
+    }
 
     #[test]
     fn extracts_cloud_code_project_shapes() {
