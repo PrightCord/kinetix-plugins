@@ -13,7 +13,7 @@
   "reasoning": {
     "supported": true,
     "mode": "level",
-    "levels": ["minimal", "low", "medium", "high", "xhigh"],
+    "levels": ["minimal", "low", "medium", "high", "xhigh", "max"],
     "default": "medium",
     "can_disable": true
   },
@@ -39,7 +39,7 @@ Every section except `schema_version` is optional. Omission means unknown/not re
 
 - `supported`: whether reasoning is known to be supported.
 - `mode`: optional `toggle` or `level`.
-- `levels`: only valid with `mode: "level"`; canonical values are `minimal`, `low`, `medium`, `high`, and `xhigh`.
+- `levels`: only valid with `mode: "level"`; canonical values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 - `default`: optional member of `levels`.
 - `can_disable`: whether reasoning can be explicitly disabled.
 
