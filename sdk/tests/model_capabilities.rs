@@ -14,6 +14,7 @@ fn round_trips_full_v1_metadata() {
             ReasoningLevel::Medium,
             ReasoningLevel::High,
             ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
         ],
         Some(ReasoningLevel::Medium),
         true,
@@ -25,6 +26,7 @@ fn round_trips_full_v1_metadata() {
     let encoded = capabilities.to_json().unwrap();
     let decoded = ModelCapabilitiesV1::from_json(&encoded).unwrap();
     assert_eq!(decoded, capabilities);
+    assert!(encoded.contains("\"max\""));
 }
 
 #[test]
