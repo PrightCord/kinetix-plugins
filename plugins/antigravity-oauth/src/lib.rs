@@ -1325,20 +1325,33 @@ fn normalized_reasoning(raw: &serde_json::Value) -> Option<ReasoningCapability> 
     Some(reasoning)
 }
 
+fn antigravity_reasoning_override(id: &str) -> Option<ReasoningCapability> {
+    id.contains("claude-opus-4-6-thinking").then(|| {
+        ReasoningCapability::level(
+            vec![ReasoningLevel::Low, ReasoningLevel::Max],
+            None,
+            false,
+        )
+    })
+}
+
 fn normalized_model_capabilities(
+    id: &str,
     info: &serde_json::Value,
 ) -> Result<Option<String>, ModelPluginError> {
-    let Some(raw) = info.get("capabilities") else {
-        return Ok(None);
-    };
-
     let mut capabilities = ModelCapabilitiesV1::default();
-    capabilities.reasoning = normalized_reasoning(raw);
-    capabilities.tools = capability_flag(raw, &["tools"]).map(SupportCapability::new);
-    capabilities.vision = capability_flag(raw, &["vision"]).map(VisionCapability::new);
-    capabilities.structured_output =
-        capability_flag(raw, &["structured_output", "structured-output"])
-            .map(SupportCapability::new);
+    capabilities.reasoning = antigravity_reasoning_override(id);
+
+    if let Some(raw) = info.get("capabilities") {
+        if capabilities.reasoning.is_none() {
+            capabilities.reasoning = normalized_reasoning(raw);
+        }
+        capabilities.tools = capability_flag(raw, &["tools"]).map(SupportCapability::new);
+        capabilities.vision = capability_flag(raw, &["vision"]).map(VisionCapability::new);
+        capabilities.structured_output =
+            capability_flag(raw, &["structured_output", "structured-output"])
+                .map(SupportCapability::new);
+    }
 
     if capabilities.is_empty() {
         return Ok(None);
@@ -1380,7 +1393,7 @@ fn normalize_model(
         .get("maxOutputTokens")
         .or_else(|| info.get("outputTokenLimit"))
         .and_then(|value| value.as_u64());
-    let capabilities_json = normalized_model_capabilities(info)?;
+    let capabilities_json = normalized_model_capabilities(&id, info)?;
     let raw_metadata = serde_json::to_string(info).ok();
 
     Ok(Some(ModelDiscoveredModel {
@@ -2005,6 +2018,62 @@ mod tests {
             Some(vec![ReasoningLevel::Low, ReasoningLevel::Max])
         );
         assert_eq!(reasoning.default, Some(ReasoningLevel::Max));
+    }
+
+    #[test]
+    fn claude_opus_46_thinking_discovery_advertises_levels_without_upstream_capabilities() {
+        let value = serde_json::json!({
+            "models": {
+                "claude-opus-4-6-thinking": {
+                    "displayName": "Claude Opus 4.6 Thinking"
+                }
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        let capabilities =
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let reasoning = capabilities.reasoning.unwrap();
+
+        assert_eq!(reasoning.mode, Some(ReasoningMode::Level));
+        assert_eq!(
+            reasoning.levels,
+            Some(vec![ReasoningLevel::Low, ReasoningLevel::Max])
+        );
+        assert_eq!(reasoning.default, None);
+        assert_eq!(reasoning.can_disable, Some(false));
+    }
+
+    #[test]
+    fn claude_opus_46_thinking_discovery_advertises_only_supported_levels() {
+        let value = serde_json::json!({
+            "models": {
+                "provider/claude-opus-4-6-thinking@latest": {
+                    "capabilities": {
+                        "reasoning": {
+                            "supported": true,
+                            "mode": "level",
+                            "levels": ["low", "medium", "high", "max"],
+                            "default": "high",
+                            "can_disable": true
+                        }
+                    }
+                }
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        let capabilities =
+            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let reasoning = capabilities.reasoning.unwrap();
+
+        assert_eq!(reasoning.mode, Some(ReasoningMode::Level));
+        assert_eq!(
+            reasoning.levels,
+            Some(vec![ReasoningLevel::Low, ReasoningLevel::Max])
+        );
+        assert_eq!(reasoning.default, None);
+        assert_eq!(reasoning.can_disable, Some(false));
     }
 
     #[test]

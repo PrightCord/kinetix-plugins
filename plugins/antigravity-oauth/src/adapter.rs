@@ -189,29 +189,7 @@ pub fn build_body(
     }
     apply_thinking(&mut generation_config, &req, &upstream_model)?;
 
-    let mut declarations = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    if let Some(tools) = req.get("tools").and_then(Value::as_array) {
-        for tool in tools {
-            let name =
-                sanitize_function_name(tool.get("name").and_then(Value::as_str).unwrap_or(""));
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let parameters = tool
-                .get("parameters")
-                .cloned()
-                .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-            declarations.push(json!({
-                "name": name,
-                "description": tool.get("description").cloned().unwrap_or(Value::Null),
-                "parametersJsonSchema": sanitize_schema(
-                    &parameters,
-                    &format!("tool '{}'", tool.get("name").and_then(Value::as_str).unwrap_or(""))
-                )?,
-            }));
-        }
-    }
+    let declarations = build_tool_declarations(&req, &provider)?;
 
     let mut request = Map::new();
     request.insert("contents".into(), Value::Array(contents));
@@ -246,6 +224,22 @@ pub fn build_body(
 
 fn provider_is_strict(provider: &Value) -> bool {
     provider.get("capability_mode").and_then(Value::as_str) == Some("strict")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaPolicy {
+    Permissive,
+    Strict,
+}
+
+impl SchemaPolicy {
+    fn from_provider(provider: &Value) -> Self {
+        if provider_is_strict(provider) {
+            Self::Strict
+        } else {
+            Self::Permissive
+        }
+    }
 }
 
 fn validate_request_contract(req: &Value) -> Result<(), AdapterError> {
@@ -386,9 +380,58 @@ fn apply_thinking(
         return Ok(());
     }
 
+    if model.contains("claude-opus-4-6-thinking") {
+        let budget = match level {
+            "low" => 8192,
+            "max" => 32768,
+            other => {
+                return Err(bad(format!(
+                    "unsupported canonical thinking level '{other}' for Antigravity Claude thinking model '{upstream_model}'; supported levels: low, max"
+                )))
+            }
+        };
+        generation_config.insert(
+            "thinkingConfig".into(),
+            json!({
+                "thinkingBudget": budget,
+                "includeThoughts": true,
+            }),
+        );
+        ensure_max_output(generation_config, budget + 8192);
+        return Ok(());
+    }
+
     Err(bad(format!(
         "canonical thinking controls are unsupported for Antigravity model '{upstream_model}'"
     )))
+}
+
+fn build_tool_declarations(req: &Value, provider: &Value) -> Result<Vec<Value>, AdapterError> {
+    let mut declarations = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(tools) = req.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            let name =
+                sanitize_function_name(tool.get("name").and_then(Value::as_str).unwrap_or(""));
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let parameters = tool
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+            declarations.push(json!({
+                "name": name,
+                "description": tool.get("description").cloned().unwrap_or(Value::Null),
+                "parametersJsonSchema": sanitize_schema_with_policy(
+                    &parameters,
+                    &format!("tool '{}'", tool.get("name").and_then(Value::as_str).unwrap_or("")),
+                    SchemaPolicy::from_provider(provider),
+                )?,
+            }));
+        }
+    }
+    Ok(declarations)
 }
 
 fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
@@ -501,16 +544,23 @@ fn sanitize_function_name(name: &str) -> String {
 }
 
 fn schema_error(path: &str, message: impl Into<String>) -> AdapterError {
-    bad(format!("Gemini tool schema at {path}: {}", message.into()))
+    bad(format!(
+        "Antigravity tool schema at {path}: {}",
+        message.into()
+    ))
 }
 
-fn sanitize_schema_list(value: &Value, path: &str) -> Result<Vec<Value>, AdapterError> {
+fn sanitize_schema_list(
+    value: &Value,
+    path: &str,
+    policy: SchemaPolicy,
+) -> Result<Vec<Value>, AdapterError> {
     value
         .as_array()
         .ok_or_else(|| schema_error(path, "expected an array of schemas"))?
         .iter()
         .enumerate()
-        .map(|(index, schema)| sanitize_schema_node(schema, &format!("{path}[{index}]")))
+        .map(|(index, schema)| sanitize_schema_node(schema, &format!("{path}[{index}]"), policy))
         .collect()
 }
 
@@ -618,10 +668,22 @@ fn add_nullable_type(schema: &mut Map<String, Value>, path: &str) -> Result<(), 
 }
 
 fn sanitize_schema(schema: &Value, root_path: &str) -> Result<Value, AdapterError> {
-    sanitize_schema_node(schema, root_path)
+    sanitize_schema_with_policy(schema, root_path, SchemaPolicy::Strict)
 }
 
-fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError> {
+fn sanitize_schema_with_policy(
+    schema: &Value,
+    root_path: &str,
+    policy: SchemaPolicy,
+) -> Result<Value, AdapterError> {
+    sanitize_schema_node(schema, root_path, policy)
+}
+
+fn sanitize_schema_node(
+    node: &Value,
+    path: &str,
+    policy: SchemaPolicy,
+) -> Result<Value, AdapterError> {
     let map = node
         .as_object()
         .ok_or_else(|| schema_error(path, "schema nodes must be JSON objects"))?;
@@ -643,7 +705,7 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
                 for (name, schema) in definitions {
                     sanitized.insert(
                         name.clone(),
-                        sanitize_schema_node(schema, &format!("{path}.{key}.{name}"))?,
+                        sanitize_schema_node(schema, &format!("{path}.{key}.{name}"), policy)?,
                     );
                 }
                 let mut incoming = Map::new();
@@ -670,34 +732,45 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
                 for (name, schema) in properties {
                     sanitized.insert(
                         name.clone(),
-                        sanitize_schema_node(schema, &format!("{path}.properties.{name}"))?,
+                        sanitize_schema_node(schema, &format!("{path}.properties.{name}"), policy)?,
                     );
                 }
                 out.insert("properties".into(), Value::Object(sanitized));
             }
 
             "items" => {
-                if let Some(items) = value.as_array() {
-                    let sanitized: Result<Vec<_>, _> = items
-                        .iter()
-                        .enumerate()
-                        .map(|(index, schema)| {
-                            sanitize_schema_node(schema, &format!("{path}.items[{index}]"))
-                        })
-                        .collect();
-                    out.insert("prefixItems".into(), Value::Array(sanitized?));
+                if value.is_array() {
+                    if policy == SchemaPolicy::Strict {
+                        return Err(schema_error(
+                            &format!("{path}.items"),
+                            "tuple-style items are unsupported by Antigravity",
+                        ));
+                    }
                 } else {
                     out.insert(
                         "items".into(),
-                        sanitize_schema_node(value, &format!("{path}.items"))?,
+                        sanitize_schema_node(value, &format!("{path}.items"), policy)?,
                     );
                 }
             }
 
-            "prefixItems" | "anyOf" => {
+            "prefixItems" => {
+                if policy == SchemaPolicy::Strict {
+                    return Err(schema_error(
+                        &format!("{path}.prefixItems"),
+                        "prefixItems is unsupported by Antigravity",
+                    ));
+                }
+            }
+
+            "anyOf" => {
                 out.insert(
                     key.clone(),
-                    Value::Array(sanitize_schema_list(value, &format!("{path}.{key}"))?),
+                    Value::Array(sanitize_schema_list(
+                        value,
+                        &format!("{path}.{key}"),
+                        policy,
+                    )?),
                 );
             }
 
@@ -710,7 +783,11 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
                 }
                 out.insert(
                     "anyOf".into(),
-                    Value::Array(sanitize_schema_list(value, &format!("{path}.oneOf"))?),
+                    Value::Array(sanitize_schema_list(
+                        value,
+                        &format!("{path}.oneOf"),
+                        policy,
+                    )?),
                 );
             }
 
@@ -720,9 +797,11 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
             "additionalProperties" => {
                 let normalized = match value {
                     Value::Bool(_) => value.clone(),
-                    Value::Object(_) => {
-                        sanitize_schema_node(value, &format!("{path}.additionalProperties"))?
-                    }
+                    Value::Object(_) => sanitize_schema_node(
+                        value,
+                        &format!("{path}.additionalProperties"),
+                        policy,
+                    )?,
                     _ => {
                         return Err(schema_error(
                             &format!("{path}.additionalProperties"),
@@ -743,6 +822,8 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
             | "minItems" | "maxItems" | "minimum" | "maximum" | "required" | "propertyOrdering" => {
                 out.insert(key.clone(), value.clone());
             }
+
+            "maxLength" if policy == SchemaPolicy::Permissive => {}
 
             other => {
                 return Err(schema_error(
@@ -766,7 +847,7 @@ fn sanitize_schema_node(node: &Value, path: &str) -> Result<Value, AdapterError>
     }
 
     if let Some(branches) = all_of {
-        let sanitized = sanitize_schema_list(branches, &format!("{path}.allOf"))?;
+        let sanitized = sanitize_schema_list(branches, &format!("{path}.allOf"), policy)?;
         let mut merged = Map::new();
         for (index, branch) in sanitized.iter().enumerate() {
             let branch = branch.as_object().ok_or_else(|| {
@@ -1368,7 +1449,69 @@ mod tests {
     }
 
     #[test]
-    fn tool_schema_matches_core_gemini_subset() {
+    fn antigravity_claude_thinking_uses_budget_and_preserves_output_reserve() {
+        let mut low = Map::new();
+        apply_thinking(
+            &mut low,
+            &json!({ "thinking": { "level": "low" } }),
+            "provider/claude-opus-4-6-thinking@latest",
+        )
+        .unwrap();
+        assert_eq!(
+            low["thinkingConfig"],
+            json!({ "thinkingBudget": 8192, "includeThoughts": true })
+        );
+        assert_eq!(low["maxOutputTokens"], 16384);
+
+        let mut max = Map::new();
+        apply_thinking(
+            &mut max,
+            &json!({ "thinking": { "level": "max" } }),
+            "claude-opus-4-6-thinking",
+        )
+        .unwrap();
+        assert_eq!(
+            max["thinkingConfig"],
+            json!({ "thinkingBudget": 32768, "includeThoughts": true })
+        );
+        assert_eq!(max["maxOutputTokens"], 40960);
+
+        let mut preserved = Map::new();
+        preserved.insert("maxOutputTokens".into(), json!(50000));
+        apply_thinking(
+            &mut preserved,
+            &json!({ "thinking": { "level": "max" } }),
+            "claude-opus-4-6-thinking",
+        )
+        .unwrap();
+        assert_eq!(preserved["maxOutputTokens"], 50000);
+
+        for level in ["off", "medium", "high"] {
+            let mut unsupported = Map::new();
+            let error = apply_thinking(
+                &mut unsupported,
+                &json!({ "thinking": { "level": level } }),
+                "claude-opus-4-6-thinking",
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "bad_request");
+            assert!(error.message.contains(level));
+            assert!(!unsupported.contains_key("thinkingConfig"));
+        }
+
+        let mut non_thinking = Map::new();
+        let error = apply_thinking(
+            &mut non_thinking,
+            &json!({ "thinking": { "level": "low" } }),
+            "claude-opus-4-6",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert!(!non_thinking.contains_key("thinkingConfig"));
+    }
+
+    #[test]
+    fn tool_schema_preserves_existing_normalization() {
         let schema = json!({
             "$ref": "#/definitions/Envelope",
             "definitions": {
@@ -1391,12 +1534,9 @@ mod tests {
                                 { "type": "number" }
                             ]
                         },
-                        "tuple": {
+                        "list": {
                             "type": "array",
-                            "items": [
-                                { "type": "string" },
-                                { "type": "integer" }
-                            ]
+                            "items": { "type": "integer" }
                         }
                     }
                 }
@@ -1418,9 +1558,171 @@ mod tests {
             Some(&json!("number"))
         );
         assert_eq!(
-            got.pointer("/$defs/Payload/properties/tuple/prefixItems/1/type"),
+            got.pointer("/$defs/Payload/properties/list/items/type"),
             Some(&json!("integer"))
         );
+    }
+
+    #[test]
+    fn permissive_tool_schema_strips_tuple_keywords() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "legacy_tuple": {
+                    "type": "array",
+                    "items": [
+                        { "type": "string" },
+                        { "type": "integer" }
+                    ]
+                },
+                "explicit_tuple": {
+                    "type": "array",
+                    "prefixItems": [
+                        { "type": "string" },
+                        { "type": "integer" }
+                    ]
+                }
+            }
+        });
+
+        let got =
+            sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+                .unwrap();
+
+        assert_eq!(
+            got.pointer("/properties/legacy_tuple/type"),
+            Some(&json!("array"))
+        );
+        assert!(got.pointer("/properties/legacy_tuple/items").is_none());
+        assert!(got
+            .pointer("/properties/legacy_tuple/prefixItems")
+            .is_none());
+        assert_eq!(
+            got.pointer("/properties/explicit_tuple/type"),
+            Some(&json!("array"))
+        );
+        assert!(got
+            .pointer("/properties/explicit_tuple/prefixItems")
+            .is_none());
+    }
+
+    #[test]
+    fn strict_tool_schema_rejects_tuple_keywords_with_path() {
+        for (keyword, value) in [
+            (
+                "items",
+                json!([{ "type": "string" }, { "type": "integer" }]),
+            ),
+            (
+                "prefixItems",
+                json!([{ "type": "string" }, { "type": "integer" }]),
+            ),
+        ] {
+            let mut array_schema = json!({ "type": "array" });
+            array_schema
+                .as_object_mut()
+                .unwrap()
+                .insert(keyword.to_string(), value);
+            let schema = json!({
+                "type": "object",
+                "properties": {
+                    "tuple": array_schema
+                }
+            });
+
+            let error = sanitize_schema(&schema, "tool 'fixture'").unwrap_err();
+            assert_eq!(error.code, "bad_request");
+            assert!(error
+                .message
+                .contains(&format!("tool 'fixture'.properties.tuple.{keyword}")));
+        }
+    }
+
+    #[test]
+    fn permissive_tool_schema_strips_max_length_recursively() {
+        let provider = json!({ "capability_mode": "permissive" });
+        let request = json!({
+            "tools": [{
+                "name": "chrome_devtools_load",
+                "description": "Load Chrome DevTools data",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Query to execute",
+                            "maxLength": 2000
+                        },
+                        "nested": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {
+                                        "type": "string",
+                                        "maxLength": 128
+                                    }
+                                },
+                                "required": ["value"]
+                            }
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }]
+        });
+
+        let declarations = build_tool_declarations(&request, &provider).unwrap();
+        let schema = declarations[0].get("parametersJsonSchema").unwrap();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["query"]));
+        assert_eq!(
+            schema.pointer("/properties/query/description"),
+            Some(&json!("Query to execute"))
+        );
+        assert!(schema.pointer("/properties/query/maxLength").is_none());
+        assert!(schema
+            .pointer("/properties/nested/items/properties/value/maxLength")
+            .is_none());
+    }
+
+    #[test]
+    fn strict_tool_schema_rejects_max_length_with_path() {
+        let provider = json!({ "capability_mode": "strict" });
+        let request = json!({
+            "tools": [{
+                "name": "chrome_devtools_load",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "maxLength": 2000
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }]
+        });
+
+        let error = build_tool_declarations(&request, &provider).unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert!(error
+            .message
+            .contains("tool 'chrome_devtools_load'.properties.query.maxLength"));
+    }
+
+    #[test]
+    fn permissive_tool_schema_still_rejects_unknown_keywords() {
+        let schema = json!({
+            "type": "object",
+            "propertyNames": { "type": "string" }
+        });
+        let error =
+            sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+                .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert!(error.message.contains("propertyNames"));
     }
 
     #[test]
@@ -1445,6 +1747,33 @@ mod tests {
             assert_eq!(error.code, "bad_request");
             assert!(error.message.contains(keyword));
         }
+    }
+
+    #[test]
+    fn thought_parts_remain_thinking_events_with_signature() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "thought": true,
+                            "text": "internal reasoning",
+                            "thoughtSignature": "sig-1"
+                        }]
+                    }
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events[0]["type"], "thinking_delta");
+        assert_eq!(events[0]["text"], "internal reasoning");
+        assert_eq!(events[0]["signature"], "sig-1");
+        assert!(!events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "text_delta"));
     }
 
     #[test]
