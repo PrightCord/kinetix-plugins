@@ -605,6 +605,76 @@ mod tests {
     }
 
     #[test]
+    fn v2_identity_variant_and_opaque_state_round_trip() {
+        let mut capabilities = ModelCapabilitiesV2::default();
+        capabilities.reasoning = Some(ReasoningCapability::level(
+            vec![ReasoningLevel::High],
+            Some(ReasoningLevel::High),
+            false,
+        ));
+        capabilities.identity = Some(ModelIdentityV2 {
+            canonical_model_id: "google/gemini-3.8-flash".into(),
+            variant: Some(ProviderVariantV1 {
+                kind: ProviderVariantKind::ReasoningTier,
+                id: "high".into(),
+                reasoning_level: Some(ReasoningLevel::High),
+                fixed: true,
+            }),
+        });
+        capabilities.opaque_state = Some(OpaqueStateCapabilityV1 {
+            kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+            family: "gemini".into(),
+            encoding_version: 1,
+            placeholder_strategy: Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator),
+        });
+
+        let encoded = capabilities.to_json().unwrap();
+        let decoded = ModelCapabilitiesV2::from_json(&encoded).unwrap();
+        assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn v2_rejects_malformed_identity_variant_and_opaque_state() {
+        let malformed = [
+            serde_json::json!({
+                "schema_version": 2,
+                "identity": {"canonical_model_id": "gemini-3.8-flash"}
+            }),
+            serde_json::json!({
+                "schema_version": 2,
+                "identity": {
+                    "canonical_model_id": "google/gemini-3.8-flash",
+                    "variant": {
+                        "kind": "provider_alias",
+                        "id": "alias",
+                        "reasoning_level": "high",
+                        "fixed": false
+                    }
+                }
+            }),
+            serde_json::json!({
+                "schema_version": 2,
+                "opaque_state": {
+                    "kind": "gemini_thought_signature",
+                    "family": "bad family",
+                    "encoding_version": 1
+                }
+            }),
+            serde_json::json!({
+                "schema_version": 2,
+                "opaque_state": {
+                    "kind": "gemini_thought_signature",
+                    "family": "gemini",
+                    "encoding_version": 0
+                }
+            }),
+        ];
+        for value in malformed {
+            assert!(ModelCapabilitiesV2::from_json(&value.to_string()).is_err());
+        }
+    }
+
+    #[test]
     fn invalid_prices_are_rejected_by_sdk_producers() {
         let mut capabilities = ModelCapabilitiesV1::default();
         capabilities.prices = Some(serde_json::json!({
