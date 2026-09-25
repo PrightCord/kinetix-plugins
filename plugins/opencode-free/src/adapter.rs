@@ -166,6 +166,20 @@ fn text_from_parts(parts: &[Value]) -> String {
         .join("")
 }
 
+fn thinking_from_parts(parts: &[Value]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| {
+            if part.get("type").and_then(Value::as_str) == Some("thinking") {
+                part.get("text").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn request_model(req: &Value, model: &Value) -> String {
     model_id(model)
         .or_else(|| req.get("requested_model").and_then(Value::as_str))
@@ -298,7 +312,7 @@ fn ensure_required_responses_tools(body: &mut Value) {
     obj.entry("tool_choice").or_insert(json!("auto"));
 }
 
-fn build_chat_body(req: &Value, model: &Value) -> Value {
+fn build_chat_body(req: &Value, model: &Value) -> Result<Value, AdapterError> {
     let mut messages = Vec::new();
 
     if let Some(system) = req.get("system").and_then(Value::as_array) {
@@ -324,6 +338,7 @@ fn build_chat_body(req: &Value, model: &Value) -> Value {
             match role {
                 "assistant" => {
                     let text = text_from_parts(parts);
+                    let thinking = thinking_from_parts(parts);
                     let content = if text.is_empty() {
                         Value::Null
                     } else {
@@ -347,6 +362,9 @@ fn build_chat_body(req: &Value, model: &Value) -> Value {
                         .collect();
 
                     let mut out = json!({"role": "assistant", "content": content});
+                    if !thinking.is_empty() {
+                        out["reasoning_content"] = Value::String(thinking);
+                    }
                     if !tool_calls.is_empty() {
                         out["tool_calls"] = Value::Array(tool_calls);
                     }
@@ -416,7 +434,7 @@ fn build_chat_body(req: &Value, model: &Value) -> Value {
     }
 
     ensure_required_chat_tools(&mut body);
-    body
+    Ok(body)
 }
 
 fn build_responses_body(req: &Value, model: &Value) -> Value {
@@ -532,7 +550,7 @@ pub fn build_body(
     let body = if is_responses_model(&id) {
         build_responses_body(&req, &model)
     } else {
-        build_chat_body(&req, &model)
+        build_chat_body(&req, &model)?
     };
 
     Ok(body.to_string())
@@ -605,6 +623,14 @@ fn parse_chat(value: &Value) -> Vec<Value> {
         .and_then(|choices| choices.first())
     {
         if let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) {
+            if let Some(thinking) = delta
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .filter(|thinking| !thinking.is_empty())
+            {
+                events.push(json!({"type":"thinking_delta","text":thinking}));
+            }
+
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
                 if !text.is_empty() {
                     events.push(json!({"type":"text_delta","text":text}));
@@ -864,6 +890,22 @@ mod tests {
         Ok(serde_json::from_str(&body).expect("adapter body must be valid JSON"))
     }
 
+    fn mimo26_chat_body(messages: Value) -> Result<Value, AdapterError> {
+        let request = serde_json::json!({
+            "requested_model": "mimo-v2.6-flash-free",
+            "system": [],
+            "messages": messages,
+            "tools": [],
+            "stream": true
+        });
+        let body = build_body(
+            &request.to_string(),
+            "{}",
+            r#"{"upstream_id":"mimo-v2.6-flash-free"}"#,
+        )?;
+        Ok(serde_json::from_str(&body).expect("adapter body must be valid JSON"))
+    }
+
     #[test]
     fn chooses_endpoint_by_model_family() {
         let provider = r#"{"base_url":"https://opencode.ai"}"#;
@@ -877,7 +919,6 @@ mod tests {
         .unwrap()
         .ends_with("/zen/v1/responses"));
     }
-
     #[test]
     fn chat_body_injects_required_free_tier_tools() {
         let req = r#"{
@@ -900,6 +941,108 @@ mod tests {
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"read"));
         assert_eq!(out["stream"], true);
+    }
+
+    #[test]
+    fn chat_body_does_not_invent_mimo_thinking_wire_control() {
+        let request = serde_json::json!({
+            "requested_model": "mimo-v2.6-flash-free",
+            "system": [],
+            "messages": [],
+            "tools": [],
+            "stream": true,
+            "thinking": {"level": "high"}
+        });
+        let body = build_body(
+            &request.to_string(),
+            "{}",
+            r#"{"upstream_id":"mimo-v2.6-flash-free"}"#,
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert!(out.get("thinking").is_none());
+        assert!(out.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn responses_body_does_not_invent_thinking_wire_control() {
+        let request = serde_json::json!({
+            "requested_model": "muse-spark-1.3-contributor-free",
+            "system": [],
+            "messages": [],
+            "tools": [],
+            "stream": true,
+            "thinking": {"level": "high"}
+        });
+        let body = build_body(
+            &request.to_string(),
+            "{}",
+            r#"{"upstream_id":"muse-spark-1.3-contributor-free"}"#,
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert!(out.get("thinking").is_none());
+        assert!(out.get("reasoning_effort").is_none());
+        assert!(out.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn non_toggle_chat_model_does_not_invent_thinking_wire_control() {
+        let request = serde_json::json!({
+            "requested_model": "mimo-v2.5-free",
+            "system": [],
+            "messages": [],
+            "tools": [],
+            "stream": true,
+            "thinking": {"level": "high"}
+        });
+        let body = build_body(
+            &request.to_string(),
+            "{}",
+            r#"{"upstream_id":"mimo-v2.5-free"}"#,
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert!(out.get("thinking").is_none());
+        assert!(out.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn chat_body_preserves_reasoning_with_tool_call_history() {
+        let out = mimo26_chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"thinking","text":"checking "},
+                {"type":"thinking","text":"the file"},
+                {"type":"tool_call","id":"call_reason","name":"read","arguments":"{\"path\":\"README.md\"}","signature":null}
+            ]},
+            {"role":"tool","parts":[
+                {"type":"tool_result","tool_call_id":"call_reason","name":"read","content":"ok","is_error":false}
+            ]}
+        ]))
+        .unwrap();
+
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["reasoning_content"], "checking the file");
+        assert!(messages[0]["content"].is_null());
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_reason");
+        assert_eq!(messages[1]["tool_call_id"], "call_reason");
+    }
+
+    #[test]
+    fn chat_body_preserves_visible_text_separately_from_reasoning() {
+        let out = mimo26_chat_body(serde_json::json!([
+            {"role":"assistant","parts":[
+                {"type":"thinking","text":"private reasoning"},
+                {"type":"text","text":"visible answer"},
+                {"type":"tool_call","id":"call_text","name":"read","arguments":"{}","signature":null}
+            ]}
+        ]))
+        .unwrap();
+
+        let message = &out["messages"][0];
+        assert_eq!(message["reasoning_content"], "private reasoning");
+        assert_eq!(message["content"], "visible answer");
+        assert_eq!(message["tool_calls"][0]["id"], "call_text");
     }
 
     #[test]
@@ -1089,6 +1232,95 @@ mod tests {
     }
 
     #[test]
+    fn parses_chat_stream_reasoning_content() {
+        let out: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"choices":[{"delta":{"reasoning_content":"checking..."},"finish_reason":null}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            out.as_array().unwrap(),
+            &[serde_json::json!({"type":"thinking_delta","text":"checking..."})]
+        );
+    }
+
+    #[test]
+    fn parses_chat_stream_reasoning_and_visible_content_separately() {
+        let out: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"choices":[{"delta":{"reasoning_content":"thinking","content":"answer"},"finish_reason":null}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let events = out.as_array().unwrap();
+        assert_eq!(
+            events[0],
+            serde_json::json!({"type":"thinking_delta","text":"thinking"})
+        );
+        assert_eq!(
+            events[1],
+            serde_json::json!({"type":"text_delta","text":"answer"})
+        );
+    }
+
+    #[test]
+    fn ignores_empty_or_null_chat_reasoning_content() {
+        for data in [
+            r#"{"choices":[{"delta":{"reasoning_content":""},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":null},"finish_reason":null}]}"#,
+        ] {
+            let out: Value = serde_json::from_str(&parse_stream_chunk(data).unwrap()).unwrap();
+            assert!(out.as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn parses_full_chat_reasoning_before_visible_content() {
+        let out: Value = serde_json::from_str(
+            &parse_full_response(
+                r#"{"id":"chatcmpl-full","object":"chat.completion","choices":[{"index":0,"message":{"reasoning_content":"checking...","content":"done"},"finish_reason":"stop"}]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let events = out.as_array().unwrap();
+
+        let thinking_index = events
+            .iter()
+            .position(|event| event["type"] == "thinking_delta")
+            .unwrap();
+        let text_index = events
+            .iter()
+            .position(|event| event["type"] == "text_delta")
+            .unwrap();
+        assert!(thinking_index < text_index);
+        assert_eq!(events[thinking_index]["text"], "checking...");
+        assert_eq!(events[text_index]["text"], "done");
+    }
+
+    #[test]
+    fn chat_reasoning_usage_stays_separate_from_output_total() {
+        let out: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":12,"completion_tokens_details":{"reasoning_tokens":5}}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let usage = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "usage")
+            .unwrap();
+        assert_eq!(usage["output"], 12);
+        assert_eq!(usage["thinking"], 5);
+    }
+
+    #[test]
     fn parses_chat_stream_tool_calls_across_chunks() {
         let first: Value = serde_json::from_str(
             &parse_stream_chunk(
@@ -1161,7 +1393,6 @@ mod tests {
                 && event["id"] == "call_1"
                 && event["name"] == "read"
         }));
-
         let delta: Value = serde_json::from_str(
             &parse_stream_chunk(
                 r#"{"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_1","delta":"{\"path\":\"README" }"#,
