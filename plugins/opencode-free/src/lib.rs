@@ -528,7 +528,7 @@ mod tests {
             caps.reasoning
                 .as_ref()
                 .and_then(|reasoning| reasoning.can_disable),
-            Some(true)
+            None
         );
         assert_eq!(caps.tools.as_ref().map(|tools| tools.supported), Some(true));
         assert_eq!(

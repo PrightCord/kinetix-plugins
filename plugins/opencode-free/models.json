@@ -6,9 +6,7 @@
       "context_window": 1000000,
       "max_output_tokens": 128000,
       "reasoning": {
-        "supported": true,
-        "mode": "toggle",
-        "can_disable": true
+        "supported": true
       },
       "tools": true,
       "structured_output": true,
