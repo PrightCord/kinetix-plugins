@@ -1167,7 +1167,10 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
                                 "signature": signature,
                             }));
                         }
-                    } else if function_call.is_none() && signature.is_some() && text.unwrap_or("").is_empty() {
+                    } else if function_call.is_none()
+                        && signature.is_some()
+                        && text.unwrap_or("").is_empty()
+                    {
                         // Google may stream the continuation signature in a
                         // standalone or empty-text part before the functionCall.
                         // Core ToolStreamState owns the single-use pending
