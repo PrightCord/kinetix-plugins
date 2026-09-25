@@ -564,6 +564,14 @@ fn sanitize_schema_list(
         .collect()
 }
 
+fn tuple_variants_to_items(variants: Vec<Value>) -> Option<Value> {
+    match variants.len() {
+        0 => None,
+        1 => variants.into_iter().next(),
+        _ => Some(json!({ "anyOf": variants })),
+    }
+}
+
 fn merge_schema_maps(
     target: &mut Map<String, Value>,
     incoming: &Map<String, Value>,
@@ -691,6 +699,8 @@ fn sanitize_schema_node(
     let mut nullable = false;
     let mut const_value: Option<Value> = None;
     let mut all_of: Option<&Value> = None;
+    let mut prefix_items: Option<Vec<Value>> = None;
+    let mut boolean_items: Option<bool> = None;
 
     for (key, value) in map {
         match key.as_str() {
@@ -738,21 +748,36 @@ fn sanitize_schema_node(
                 out.insert("properties".into(), Value::Object(sanitized));
             }
 
-            "items" => {
-                if value.is_array() {
+            "items" => match value {
+                Value::Array(_) => {
                     if policy == SchemaPolicy::Strict {
                         return Err(schema_error(
                             &format!("{path}.items"),
                             "tuple-style items are unsupported by Antigravity",
                         ));
                     }
-                } else {
+                    // Legacy tuple items have an unrestricted tail when
+                    // additionalItems is omitted. Validate the tuple branches
+                    // recursively, then drop the positional constraint rather
+                    // than narrowing every element to their union.
+                    let _ = sanitize_schema_list(value, &format!("{path}.items"), policy)?;
+                }
+                Value::Object(_) => {
                     out.insert(
                         "items".into(),
                         sanitize_schema_node(value, &format!("{path}.items"), policy)?,
                     );
                 }
-            }
+                Value::Bool(allowed) => {
+                    boolean_items = Some(*allowed);
+                }
+                _ => {
+                    return Err(schema_error(
+                        &format!("{path}.items"),
+                        "must be a schema object, boolean, or array of schemas",
+                    ));
+                }
+            },
 
             "prefixItems" => {
                 if policy == SchemaPolicy::Strict {
@@ -761,6 +786,11 @@ fn sanitize_schema_node(
                         "prefixItems is unsupported by Antigravity",
                     ));
                 }
+                prefix_items = Some(sanitize_schema_list(
+                    value,
+                    &format!("{path}.prefixItems"),
+                    policy,
+                )?);
             }
 
             "anyOf" => {
@@ -818,6 +848,13 @@ fn sanitize_schema_node(
                 })?;
             }
 
+            "pattern" => {
+                value
+                    .as_str()
+                    .ok_or_else(|| schema_error(&format!("{path}.pattern"), "must be a string"))?;
+                out.insert(key.clone(), value.clone());
+            }
+
             "$id" | "$anchor" | "type" | "format" | "title" | "description" | "enum"
             | "minItems" | "maxItems" | "minimum" | "maximum" | "required" | "propertyOrdering" => {
                 out.insert(key.clone(), value.clone());
@@ -859,6 +896,40 @@ fn sanitize_schema_node(
             merge_schema_maps(&mut merged, branch, &format!("{path}.allOf[{index}]"))?;
         }
         merge_schema_maps(&mut out, &merged, path)?;
+    }
+
+    if let Some(mut variants) = prefix_items {
+        let prefix_len = variants.len() as u64;
+        if let Some(items) = out.remove("items") {
+            // Positional prefix + homogeneous tail cannot be represented
+            // directly. Union both sides as a safe widening.
+            variants.push(items);
+            if let Some(items) = tuple_variants_to_items(variants) {
+                out.insert("items".into(), items);
+            }
+        } else if boolean_items == Some(false) {
+            // Closed tuple: widen the positional schemas into a homogeneous
+            // union, but keep the tuple closed at the original prefix length.
+            if let Some(items) = tuple_variants_to_items(variants) {
+                out.insert("items".into(), items);
+            }
+            let max_items = out
+                .get("maxItems")
+                .and_then(Value::as_u64)
+                .map(|current| current.min(prefix_len))
+                .unwrap_or(prefix_len);
+            out.insert("maxItems".into(), json!(max_items));
+        }
+        // Omitted / true items means an unrestricted tail. Dropping
+        // prefixItems is lossy but permissive; synthesizing homogeneous items
+        // would incorrectly narrow valid trailing elements.
+    } else if let Some(allowed) = boolean_items {
+        if policy == SchemaPolicy::Strict || !allowed {
+            return Err(schema_error(
+                &format!("{path}.items"),
+                "boolean items are unsupported by Antigravity without prefixItems",
+            ));
+        }
     }
 
     if nullable {
@@ -1564,7 +1635,106 @@ mod tests {
     }
 
     #[test]
-    fn permissive_tool_schema_strips_tuple_keywords() {
+    fn permissive_tool_schema_preserves_pi_subagent_workflow_pattern() {
+        let provider = json!({ "capability_mode": "permissive" });
+        let request = json!({
+            "tools": [{
+                "name": "SubagentWorkflow",
+                "description": "Run a deterministic workflow",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "script": { "type": "string" },
+                        "scriptPath": { "type": "string" },
+                        "name": { "type": "string" },
+                        "resumeFromRunId": {
+                            "type": "string",
+                            "pattern": "^wf_[a-z0-9-]{6,}$",
+                            "description": "Replay an earlier workflow run"
+                        }
+                    }
+                }
+            }]
+        });
+
+        let declarations = build_tool_declarations(&request, &provider).unwrap();
+        let schema = declarations[0].get("parametersJsonSchema").unwrap();
+        assert_eq!(
+            schema.pointer("/properties/resumeFromRunId/pattern"),
+            Some(&json!("^wf_[a-z0-9-]{6,}$"))
+        );
+    }
+
+    #[test]
+    fn strict_tool_schema_preserves_supported_pattern() {
+        let provider = json!({ "capability_mode": "strict" });
+        let request = json!({
+            "tools": [{
+                "name": "fixture",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "type": "string",
+                            "pattern": "^[a-z]+$"
+                        }
+                    }
+                }
+            }]
+        });
+
+        let declarations = build_tool_declarations(&request, &provider).unwrap();
+        let schema = declarations[0].get("parametersJsonSchema").unwrap();
+        assert_eq!(
+            schema.pointer("/properties/value/pattern"),
+            Some(&json!("^[a-z]+$"))
+        );
+    }
+
+    #[test]
+    fn tool_schema_preserves_pattern_recursively() {
+        let schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "pattern": "^id_[0-9]+$"
+                    }
+                }
+            }
+        });
+
+        let got = sanitize_schema(&schema, "tool 'fixture'").unwrap();
+        assert_eq!(
+            got.pointer("/items/properties/id/pattern"),
+            Some(&json!("^id_[0-9]+$"))
+        );
+    }
+
+    #[test]
+    fn tool_schema_rejects_non_string_pattern_with_path() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "pattern": 42
+                }
+            }
+        });
+
+        let error = sanitize_schema(&schema, "tool 'fixture'").unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert!(error
+            .message
+            .contains("tool 'fixture'.properties.value.pattern"));
+        assert!(error.message.contains("must be a string"));
+    }
+
+    #[test]
+    fn permissive_open_tuple_keywords_do_not_narrow_tail() {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -1588,21 +1758,78 @@ mod tests {
         let got = sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
             .unwrap();
 
-        assert_eq!(
-            got.pointer("/properties/legacy_tuple/type"),
-            Some(&json!("array"))
-        );
         assert!(got.pointer("/properties/legacy_tuple/items").is_none());
-        assert!(got
-            .pointer("/properties/legacy_tuple/prefixItems")
-            .is_none());
-        assert_eq!(
-            got.pointer("/properties/explicit_tuple/type"),
-            Some(&json!("array"))
-        );
+        assert!(got.pointer("/properties/explicit_tuple/items").is_none());
         assert!(got
             .pointer("/properties/explicit_tuple/prefixItems")
             .is_none());
+    }
+
+    #[test]
+    fn permissive_open_prefix_items_with_true_tail_stays_unrestricted() {
+        let schema = json!({
+            "type": "array",
+            "prefixItems": [{
+                "type": "string",
+                "pattern": "^wf_"
+            }],
+            "items": true
+        });
+
+        let got = sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+            .unwrap();
+
+        assert!(got.pointer("/items").is_none());
+        assert!(got.pointer("/prefixItems").is_none());
+    }
+
+    #[test]
+    fn permissive_prefix_items_combines_trailing_items_schema() {
+        let schema = json!({
+            "type": "array",
+            "prefixItems": [
+                { "type": "string" },
+                { "type": "integer" }
+            ],
+            "items": {
+                "type": "boolean"
+            }
+        });
+
+        let got = sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+            .unwrap();
+
+        assert_eq!(got.pointer("/items/anyOf/0/type"), Some(&json!("string")));
+        assert_eq!(got.pointer("/items/anyOf/1/type"), Some(&json!("integer")));
+        assert_eq!(got.pointer("/items/anyOf/2/type"), Some(&json!("boolean")));
+        assert!(got.pointer("/prefixItems").is_none());
+    }
+
+    #[test]
+    fn permissive_closed_prefix_tuple_handles_items_false() {
+        let schema = json!({
+            "type": "array",
+            "prefixItems": [
+                { "type": "string" },
+                { "type": "integer" }
+            ],
+            "items": false,
+            "maxItems": 99
+        });
+
+        let got = sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+            .unwrap();
+
+        assert_eq!(got.pointer("/items/anyOf/0/type"), Some(&json!("string")));
+        assert_eq!(got.pointer("/items/anyOf/1/type"), Some(&json!("integer")));
+        assert_eq!(
+            got.pointer("/items/anyOf")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(got.pointer("/maxItems"), Some(&json!(2)));
+        assert!(got.pointer("/prefixItems").is_none());
     }
 
     #[test]
@@ -1730,7 +1957,6 @@ mod tests {
             ("exclusiveMinimum", json!(0)),
             ("exclusiveMaximum", json!(10)),
             ("propertyNames", json!({ "type": "string" })),
-            ("pattern", json!("^[a-z]+$")),
         ] {
             let mut property = json!({ "type": "string" });
             property
