@@ -103,16 +103,16 @@
       "publisher": "Kinetix",
       "official": true,
       "homepage": "https://github.com/PrightCord/kinetix-plugins/tree/main/plugins/opencode-free",
-      "latest_version": "0.1.6",
-      "artifact_name": "dev.kinetix.opencode-free-0.1.6.kxp",
+      "latest_version": "0.1.7",
+      "artifact_name": "dev.kinetix.opencode-free-0.1.7.kxp",
       "capabilities": [
         "model_source",
         "provider_adapter"
       ],
       "installable": true,
       "distribution": {
-        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/opencode-free-v0.1.6/dev.kinetix.opencode-free-0.1.6.kxp",
-        "sha256": "7c9cb23f8f859e364e176dd8248f20ddd15900476dc029f8f0c3115ef720db1e",
+        "url": "https://github.com/PrightCord/kinetix-plugins/releases/download/opencode-free-v0.1.7/dev.kinetix.opencode-free-0.1.7.kxp",
+        "sha256": "bc03f29c0b4d4f6c2aacf1a2d7c8e0375c4f7b1b44f301634eed123604c92f3e",
         "publisher_key_id": "kinetix-official-v1",
         "allowed_hosts": [
           "github.com",
