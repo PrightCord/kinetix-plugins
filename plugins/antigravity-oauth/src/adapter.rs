@@ -1154,18 +1154,36 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
         for c in candidates {
             if let Some(parts) = c.pointer("/content/parts").and_then(|p| p.as_array()) {
                 for p in parts {
-                    if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
-                        if p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
+                    let text = p.get("text").and_then(|t| t.as_str());
+                    let signature = p.get("thoughtSignature").and_then(|s| s.as_str());
+                    let function_call = p.get("functionCall");
+                    let is_thought = p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+
+                    if is_thought {
+                        if text.is_some() || signature.is_some() {
                             events.push(json!({
                                 "type": "thinking_delta",
-                                "text": text,
-                                "signature": p.get("thoughtSignature").and_then(|s| s.as_str()),
+                                "text": text.unwrap_or(""),
+                                "signature": signature,
                             }));
-                        } else {
+                        }
+                    } else if function_call.is_none() && signature.is_some() && text.unwrap_or("").is_empty() {
+                        // Google may stream the continuation signature in a
+                        // standalone or empty-text part before the functionCall.
+                        // Core ToolStreamState owns the single-use pending
+                        // signature and attaches it to the next tool call.
+                        events.push(json!({
+                            "type": "thinking_delta",
+                            "text": "",
+                            "signature": signature,
+                        }));
+                    } else if let Some(text) = text {
+                        if !text.is_empty() {
                             events.push(json!({ "type": "text_delta", "text": text }));
                         }
                     }
-                    if let Some(fc) = p.get("functionCall") {
+
+                    if let Some(fc) = function_call {
                         let name = sanitize_function_name(
                             fc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
                         );
