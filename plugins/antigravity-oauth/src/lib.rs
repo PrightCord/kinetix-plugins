@@ -1427,6 +1427,7 @@ fn antigravity_model_profile(id: &str) -> AntigravityModelProfile {
     }
 
     match id {
+        "gemini-3.1-flash-lite" => gemini_base_profile("google/gemini-3.1-flash-lite"),
         "gemini-3.1-pro-low" => {
             fixed_reasoning_variant("google/gemini-3.1-pro", "low", ReasoningLevel::Low)
         }
@@ -2241,6 +2242,7 @@ mod tests {
                 "gemini-3.8-flash-medium": {},
                 "gemini-3.8-flash-high": {},
                 "gemini-3.8-flash-tiered": {},
+                "gemini-3.1-flash-lite": {},
                 "claude-opus-4-6-thinking": {}
             }
         });
@@ -2268,6 +2270,24 @@ mod tests {
             assert_eq!(variant.fixed, fixed);
             assert_eq!(capabilities.opaque_state.unwrap().family, "gemini");
         }
+
+        let flash_lite = by_id["gemini-3.1-flash-lite"];
+        assert_eq!(flash_lite.id, "gemini-3.1-flash-lite");
+        let capabilities =
+            ModelCapabilitiesV2::from_json(flash_lite.capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let identity = capabilities.identity.unwrap();
+        assert_eq!(
+            identity.canonical_model_id,
+            "google/gemini-3.1-flash-lite"
+        );
+        assert!(identity.variant.is_none());
+        let opaque_state = capabilities.opaque_state.unwrap();
+        assert_eq!(opaque_state.family, "gemini");
+        assert_eq!(
+            opaque_state.placeholder_strategy,
+            Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator)
+        );
 
         let claude = by_id["claude-opus-4-6-thinking"];
         assert_eq!(claude.id, "claude-opus-4-6-thinking");
