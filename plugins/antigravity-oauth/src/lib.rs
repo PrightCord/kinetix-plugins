@@ -29,10 +29,9 @@ use kinetix::plugin::types::*;
 use kinetix_plugin_sdk::{
     export, exports, kinetix,
     model_capabilities::{
-        ModelCapabilitiesV2, ModelIdentityV2, OpaqueStateCapabilityKind,
-        OpaqueStateCapabilityV1, OpaqueStatePlaceholderStrategy, ProviderVariantKind,
-        ProviderVariantV1, ReasoningCapability, ReasoningLevel, ReasoningMode, SupportCapability,
-        VisionCapability,
+        ModelCapabilitiesV2, ModelIdentityV2, OpaqueStateCapabilityKind, OpaqueStateCapabilityV1,
+        OpaqueStatePlaceholderStrategy, ProviderVariantKind, ProviderVariantV1,
+        ReasoningCapability, ReasoningLevel, ReasoningMode, SupportCapability, VisionCapability,
     },
 };
 
@@ -1353,11 +1352,7 @@ fn fixed_reasoning_variant(
             reasoning_level: Some(level),
             fixed: true,
         }),
-        reasoning: Some(ReasoningCapability::level(
-            vec![level],
-            Some(level),
-            false,
-        )),
+        reasoning: Some(ReasoningCapability::level(vec![level], Some(level), false)),
         opaque_state: Some(OpaqueStateCapabilityV1 {
             kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
             family: "gemini".into(),
@@ -1423,9 +1418,7 @@ fn antigravity_model_profile(id: &str) -> AntigravityModelProfile {
         if let Some(tier) = id.strip_prefix(&format!("{family}-")) {
             return match tier {
                 "low" => fixed_reasoning_variant(&canonical, "low", ReasoningLevel::Low),
-                "medium" => {
-                    fixed_reasoning_variant(&canonical, "medium", ReasoningLevel::Medium)
-                }
+                "medium" => fixed_reasoning_variant(&canonical, "medium", ReasoningLevel::Medium),
                 "high" => fixed_reasoning_variant(&canonical, "high", ReasoningLevel::High),
                 "tiered" => tiered_reasoning_variant(&canonical),
                 _ => AntigravityModelProfile::default(),
@@ -2252,8 +2245,10 @@ mod tests {
             }
         });
         let models = parse_model_catalog(&value).unwrap();
-        let by_id: std::collections::HashMap<_, _> =
-            models.iter().map(|model| (model.id.as_str(), model)).collect();
+        let by_id: std::collections::HashMap<_, _> = models
+            .iter()
+            .map(|model| (model.id.as_str(), model))
+            .collect();
 
         for (id, tier, fixed) in [
             ("gemini-3.8-flash-low", "low", true),
@@ -2264,7 +2259,8 @@ mod tests {
             let model = by_id[id];
             assert_eq!(model.id, id);
             let capabilities =
-                ModelCapabilitiesV2::from_json(model.capabilities_json.as_deref().unwrap()).unwrap();
+                ModelCapabilitiesV2::from_json(model.capabilities_json.as_deref().unwrap())
+                    .unwrap();
             let identity = capabilities.identity.unwrap();
             assert_eq!(identity.canonical_model_id, "google/gemini-3.8-flash");
             let variant = identity.variant.unwrap();
