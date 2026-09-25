@@ -330,9 +330,7 @@ pub enum OpaqueStatePlaceholderStrategy {
     Gemini3SkipValidator,
 }
 
-fn validate_prices(
-    prices: Option<&serde_json::Value>,
-) -> Result<(), CapabilityMetadataError> {
+fn validate_prices(prices: Option<&serde_json::Value>) -> Result<(), CapabilityMetadataError> {
     let Some(prices) = prices else {
         return Ok(());
     };
