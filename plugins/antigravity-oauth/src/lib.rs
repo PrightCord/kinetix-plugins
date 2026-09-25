@@ -2277,10 +2277,7 @@ mod tests {
             ModelCapabilitiesV2::from_json(flash_lite.capabilities_json.as_deref().unwrap())
                 .unwrap();
         let identity = capabilities.identity.unwrap();
-        assert_eq!(
-            identity.canonical_model_id,
-            "google/gemini-3.1-flash-lite"
-        );
+        assert_eq!(identity.canonical_model_id, "google/gemini-3.1-flash-lite");
         assert!(identity.variant.is_none());
         let opaque_state = capabilities.opaque_state.unwrap();
         assert_eq!(opaque_state.family, "gemini");
