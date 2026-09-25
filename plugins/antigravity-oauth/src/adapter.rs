@@ -1585,9 +1585,8 @@ mod tests {
             }
         });
 
-        let got =
-            sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
-                .unwrap();
+        let got = sanitize_schema_with_policy(&schema, "tool 'fixture'", SchemaPolicy::Permissive)
+            .unwrap();
 
         assert_eq!(
             got.pointer("/properties/legacy_tuple/type"),

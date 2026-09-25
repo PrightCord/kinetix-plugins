@@ -1327,11 +1327,7 @@ fn normalized_reasoning(raw: &serde_json::Value) -> Option<ReasoningCapability> 
 
 fn antigravity_reasoning_override(id: &str) -> Option<ReasoningCapability> {
     id.contains("claude-opus-4-6-thinking").then(|| {
-        ReasoningCapability::level(
-            vec![ReasoningLevel::Low, ReasoningLevel::Max],
-            None,
-            false,
-        )
+        ReasoningCapability::level(vec![ReasoningLevel::Low, ReasoningLevel::Max], None, false)
     })
 }
 
