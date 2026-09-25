@@ -29,8 +29,9 @@ use kinetix::plugin::types::*;
 use kinetix_plugin_sdk::{
     export, exports, kinetix,
     model_capabilities::{
-        ModelCapabilitiesV1, ReasoningCapability, ReasoningLevel, ReasoningMode, SupportCapability,
-        VisionCapability,
+        ModelCapabilitiesV2, ModelIdentityV2, OpaqueStateCapabilityKind, OpaqueStateCapabilityV1,
+        OpaqueStatePlaceholderStrategy, ProviderVariantKind, ProviderVariantV1,
+        ReasoningCapability, ReasoningLevel, ReasoningMode, SupportCapability, VisionCapability,
     },
 };
 
@@ -1325,18 +1326,179 @@ fn normalized_reasoning(raw: &serde_json::Value) -> Option<ReasoningCapability> 
     Some(reasoning)
 }
 
-fn antigravity_reasoning_override(id: &str) -> Option<ReasoningCapability> {
-    id.contains("claude-opus-4-6-thinking").then(|| {
-        ReasoningCapability::level(vec![ReasoningLevel::Low, ReasoningLevel::Max], None, false)
-    })
+#[derive(Debug, Clone, Default)]
+struct AntigravityModelProfile {
+    canonical_model_id: Option<String>,
+    variant: Option<ProviderVariantV1>,
+    reasoning: Option<ReasoningCapability>,
+    opaque_state: Option<OpaqueStateCapabilityV1>,
+}
+
+fn normalized_profile_id(id: &str) -> &str {
+    let leaf = id.rsplit('/').next().unwrap_or(id);
+    leaf.strip_suffix("@latest").unwrap_or(leaf)
+}
+
+fn fixed_reasoning_variant(
+    canonical_model_id: &str,
+    id: &str,
+    level: ReasoningLevel,
+) -> AntigravityModelProfile {
+    AntigravityModelProfile {
+        canonical_model_id: Some(canonical_model_id.to_string()),
+        variant: Some(ProviderVariantV1 {
+            kind: ProviderVariantKind::ReasoningTier,
+            id: id.to_string(),
+            reasoning_level: Some(level),
+            fixed: true,
+        }),
+        reasoning: Some(ReasoningCapability::level(vec![level], Some(level), false)),
+        opaque_state: Some(OpaqueStateCapabilityV1 {
+            kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+            family: "gemini".into(),
+            encoding_version: 1,
+            placeholder_strategy: Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator),
+        }),
+    }
+}
+
+fn tiered_reasoning_variant(canonical_model_id: &str) -> AntigravityModelProfile {
+    AntigravityModelProfile {
+        canonical_model_id: Some(canonical_model_id.to_string()),
+        variant: Some(ProviderVariantV1 {
+            kind: ProviderVariantKind::ReasoningTier,
+            id: "tiered".into(),
+            reasoning_level: None,
+            fixed: false,
+        }),
+        reasoning: Some(ReasoningCapability::level(
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ],
+            Some(ReasoningLevel::Medium),
+            false,
+        )),
+        opaque_state: Some(OpaqueStateCapabilityV1 {
+            kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+            family: "gemini".into(),
+            encoding_version: 1,
+            placeholder_strategy: Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator),
+        }),
+    }
+}
+
+fn gemini_base_profile(canonical_model_id: &str) -> AntigravityModelProfile {
+    AntigravityModelProfile {
+        canonical_model_id: Some(canonical_model_id.to_string()),
+        opaque_state: Some(OpaqueStateCapabilityV1 {
+            kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+            family: "gemini".into(),
+            encoding_version: 1,
+            placeholder_strategy: Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator),
+        }),
+        ..Default::default()
+    }
+}
+
+fn antigravity_model_profile(id: &str) -> AntigravityModelProfile {
+    let id = normalized_profile_id(id);
+
+    for family in [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ] {
+        let canonical = format!("google/{family}");
+        if id == family {
+            return gemini_base_profile(&canonical);
+        }
+        if let Some(tier) = id.strip_prefix(&format!("{family}-")) {
+            return match tier {
+                "low" => fixed_reasoning_variant(&canonical, "low", ReasoningLevel::Low),
+                "medium" => fixed_reasoning_variant(&canonical, "medium", ReasoningLevel::Medium),
+                "high" => fixed_reasoning_variant(&canonical, "high", ReasoningLevel::High),
+                "tiered" => tiered_reasoning_variant(&canonical),
+                _ => AntigravityModelProfile::default(),
+            };
+        }
+    }
+
+    match id {
+        "gemini-3.1-flash-lite" => gemini_base_profile("google/gemini-3.1-flash-lite"),
+        "gemini-3.1-pro-low" => {
+            fixed_reasoning_variant("google/gemini-3.1-pro", "low", ReasoningLevel::Low)
+        }
+        "gemini-3.1-pro-high" => {
+            fixed_reasoning_variant("google/gemini-3.1-pro", "high", ReasoningLevel::High)
+        }
+        "gemini-pro-agent" => AntigravityModelProfile {
+            canonical_model_id: Some("google/gemini-3.1-pro".into()),
+            variant: Some(ProviderVariantV1 {
+                kind: ProviderVariantKind::ProviderAlias,
+                id: "pro-agent".into(),
+                reasoning_level: None,
+                fixed: false,
+            }),
+            opaque_state: Some(OpaqueStateCapabilityV1 {
+                kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+                family: "gemini".into(),
+                encoding_version: 1,
+                placeholder_strategy: Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator),
+            }),
+            ..Default::default()
+        },
+        "claude-opus-4-6-thinking" => AntigravityModelProfile {
+            canonical_model_id: Some("anthropic/claude-opus-4-6".into()),
+            variant: Some(ProviderVariantV1 {
+                kind: ProviderVariantKind::ThinkingVariant,
+                id: "thinking".into(),
+                reasoning_level: None,
+                fixed: false,
+            }),
+            // Preserve the existing Antigravity Opus execution contract.
+            reasoning: Some(ReasoningCapability::level(
+                vec![ReasoningLevel::Low, ReasoningLevel::Max],
+                None,
+                false,
+            )),
+            opaque_state: Some(OpaqueStateCapabilityV1 {
+                kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+                family: "claude".into(),
+                encoding_version: 1,
+                placeholder_strategy: None,
+            }),
+        },
+        "claude-sonnet-4-6" => AntigravityModelProfile {
+            canonical_model_id: Some("anthropic/claude-sonnet-4-6".into()),
+            opaque_state: Some(OpaqueStateCapabilityV1 {
+                kind: OpaqueStateCapabilityKind::GeminiThoughtSignature,
+                family: "claude".into(),
+                encoding_version: 1,
+                placeholder_strategy: None,
+            }),
+            ..Default::default()
+        },
+        _ => AntigravityModelProfile::default(),
+    }
 }
 
 fn normalized_model_capabilities(
     id: &str,
     info: &serde_json::Value,
 ) -> Result<Option<String>, ModelPluginError> {
-    let mut capabilities = ModelCapabilitiesV1::default();
-    capabilities.reasoning = antigravity_reasoning_override(id);
+    let profile = antigravity_model_profile(id);
+    let mut capabilities = ModelCapabilitiesV2::default();
+    capabilities.identity = profile
+        .canonical_model_id
+        .map(|canonical_model_id| ModelIdentityV2 {
+            canonical_model_id,
+            variant: profile.variant,
+        });
+    capabilities.reasoning = profile.reasoning;
+    capabilities.opaque_state = profile.opaque_state;
 
     if let Some(raw) = info.get("capabilities") {
         if capabilities.reasoning.is_none() {
@@ -1956,7 +2118,7 @@ mod tests {
         assert_eq!(models[0].context_window, Some(1048576));
         assert_eq!(models[0].max_output_tokens, Some(65536));
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
                 .unwrap();
         assert_eq!(capabilities.tools, Some(SupportCapability::new(true)));
         assert!(capabilities.reasoning.is_none());
@@ -1978,7 +2140,7 @@ mod tests {
         });
         let models = parse_model_catalog(&value).unwrap();
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
                 .unwrap();
         let reasoning = capabilities.reasoning.unwrap();
         assert!(reasoning.supported);
@@ -2006,7 +2168,7 @@ mod tests {
         });
         let models = parse_model_catalog(&value).unwrap();
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
                 .unwrap();
         let reasoning = capabilities.reasoning.unwrap();
         assert_eq!(
@@ -2027,7 +2189,7 @@ mod tests {
         });
         let models = parse_model_catalog(&value).unwrap();
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
                 .unwrap();
         let reasoning = capabilities.reasoning.unwrap();
 
@@ -2059,7 +2221,7 @@ mod tests {
         });
         let models = parse_model_catalog(&value).unwrap();
         let capabilities =
-            ModelCapabilitiesV1::from_json(models[0].capabilities_json.as_deref().unwrap())
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
                 .unwrap();
         let reasoning = capabilities.reasoning.unwrap();
 
@@ -2070,6 +2232,125 @@ mod tests {
         );
         assert_eq!(reasoning.default, None);
         assert_eq!(reasoning.can_disable, Some(false));
+    }
+
+    #[test]
+    fn antigravity_profiles_preserve_upstream_ids_and_describe_variants() {
+        let value = serde_json::json!({
+            "models": {
+                "gemini-3.8-flash-low": {},
+                "gemini-3.8-flash-medium": {},
+                "gemini-3.8-flash-high": {},
+                "gemini-3.8-flash-tiered": {},
+                "gemini-3.1-flash-lite": {},
+                "claude-opus-4-6-thinking": {}
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        let by_id: std::collections::HashMap<_, _> = models
+            .iter()
+            .map(|model| (model.id.as_str(), model))
+            .collect();
+
+        for (id, tier, fixed) in [
+            ("gemini-3.8-flash-low", "low", true),
+            ("gemini-3.8-flash-medium", "medium", true),
+            ("gemini-3.8-flash-high", "high", true),
+            ("gemini-3.8-flash-tiered", "tiered", false),
+        ] {
+            let model = by_id[id];
+            assert_eq!(model.id, id);
+            let capabilities =
+                ModelCapabilitiesV2::from_json(model.capabilities_json.as_deref().unwrap())
+                    .unwrap();
+            let identity = capabilities.identity.unwrap();
+            assert_eq!(identity.canonical_model_id, "google/gemini-3.8-flash");
+            let variant = identity.variant.unwrap();
+            assert_eq!(variant.id, tier);
+            assert_eq!(variant.fixed, fixed);
+            assert_eq!(capabilities.opaque_state.unwrap().family, "gemini");
+        }
+
+        let flash_lite = by_id["gemini-3.1-flash-lite"];
+        assert_eq!(flash_lite.id, "gemini-3.1-flash-lite");
+        let capabilities =
+            ModelCapabilitiesV2::from_json(flash_lite.capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let identity = capabilities.identity.unwrap();
+        assert_eq!(identity.canonical_model_id, "google/gemini-3.1-flash-lite");
+        assert!(identity.variant.is_none());
+        let opaque_state = capabilities.opaque_state.unwrap();
+        assert_eq!(opaque_state.family, "gemini");
+        assert_eq!(
+            opaque_state.placeholder_strategy,
+            Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator)
+        );
+
+        let claude = by_id["claude-opus-4-6-thinking"];
+        assert_eq!(claude.id, "claude-opus-4-6-thinking");
+        let capabilities =
+            ModelCapabilitiesV2::from_json(claude.capabilities_json.as_deref().unwrap()).unwrap();
+        let identity = capabilities.identity.unwrap();
+        assert_eq!(identity.canonical_model_id, "anthropic/claude-opus-4-6");
+        assert_eq!(identity.variant.unwrap().id, "thinking");
+        assert_eq!(capabilities.opaque_state.unwrap().family, "claude");
+    }
+
+    #[test]
+    fn tiered_gemini_profile_advertises_only_verified_levels() {
+        let profile = antigravity_model_profile("models/gemini-3.8-flash-tiered@latest");
+        let reasoning = profile.reasoning.unwrap();
+        assert_eq!(reasoning.mode, Some(ReasoningMode::Level));
+        assert_eq!(
+            reasoning.levels,
+            Some(vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High
+            ])
+        );
+        assert_eq!(reasoning.default, Some(ReasoningLevel::Medium));
+        assert_eq!(reasoning.can_disable, Some(false));
+    }
+
+    #[test]
+    fn unknown_antigravity_model_does_not_invent_identity_or_variant() {
+        let profile = antigravity_model_profile("future-model-9000");
+        assert!(profile.canonical_model_id.is_none());
+        assert!(profile.variant.is_none());
+        assert!(profile.reasoning.is_none());
+        assert!(profile.opaque_state.is_none());
+
+        let value = serde_json::json!({
+            "models": {
+                "future-model-9000": {"displayName": "Future Model"}
+            }
+        });
+        let models = parse_model_catalog(&value).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "future-model-9000");
+        assert!(models[0].capabilities_json.is_none());
+    }
+
+    #[test]
+    fn gemini_pro_aliases_are_explicit_not_heuristic() {
+        let low = antigravity_model_profile("gemini-3.1-pro-low");
+        assert_eq!(
+            low.canonical_model_id.as_deref(),
+            Some("google/gemini-3.1-pro")
+        );
+        assert_eq!(low.variant.unwrap().id, "low");
+
+        let alias = antigravity_model_profile("gemini-pro-agent");
+        assert_eq!(
+            alias.canonical_model_id.as_deref(),
+            Some("google/gemini-3.1-pro")
+        );
+        assert_eq!(alias.variant.unwrap().id, "pro-agent");
+
+        assert!(antigravity_model_profile("something-pro-experimental")
+            .canonical_model_id
+            .is_none());
     }
 
     #[test]

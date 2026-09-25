@@ -1154,18 +1154,30 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
         for c in candidates {
             if let Some(parts) = c.pointer("/content/parts").and_then(|p| p.as_array()) {
                 for p in parts {
-                    if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
-                        if p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
-                            events.push(json!({
-                                "type": "thinking_delta",
-                                "text": text,
-                                "signature": p.get("thoughtSignature").and_then(|s| s.as_str()),
-                            }));
-                        } else {
-                            events.push(json!({ "type": "text_delta", "text": text }));
+                    let text = p.get("text").and_then(|t| t.as_str());
+                    let signature = p.get("thoughtSignature").and_then(|s| s.as_str());
+                    let function_call = p.get("functionCall");
+                    let is_thought = p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+
+                    if is_thought {
+                        if let Some(text) = text {
+                            if !text.is_empty() {
+                                events.push(json!({
+                                    "type": "thinking_delta",
+                                    "text": text,
+                                    "signature": Value::Null,
+                                }));
+                            }
+                        }
+                    } else if function_call.is_none() {
+                        if let Some(text) = text {
+                            if !text.is_empty() {
+                                events.push(json!({ "type": "text_delta", "text": text }));
+                            }
                         }
                     }
-                    if let Some(fc) = p.get("functionCall") {
+
+                    if let Some(fc) = function_call {
                         let name = sanitize_function_name(
                             fc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
                         );
@@ -1175,7 +1187,7 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
                             "index": tool_index,
                             "id": Value::Null,
                             "name": name,
-                            "signature": p.get("thoughtSignature").and_then(|s| s.as_str()),
+                            "signature": signature,
                         }));
                         events.push(json!({
                             "type": "tool_call_args_delta",
@@ -1183,6 +1195,16 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
                             "args": args.to_string(),
                         }));
                         tool_index += 1;
+                    } else if signature.is_some() {
+                        // Any part-level continuation signature that is not
+                        // directly attached to a functionCall is normalized
+                        // into the host's pending-signature contract *after*
+                        // emitting the part's visible/thinking content.
+                        events.push(json!({
+                            "type": "thinking_delta",
+                            "text": "",
+                            "signature": signature,
+                        }));
                     }
                 }
             }
@@ -1975,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_parts_remain_thinking_events_with_signature() {
+    fn signed_non_empty_thought_emits_content_then_pending_signature_marker() {
         let chunk = json!({
             "response": {
                 "candidates": [{
@@ -1991,14 +2013,159 @@ mod tests {
         });
         let events: Value =
             serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 2);
         assert_eq!(events[0]["type"], "thinking_delta");
         assert_eq!(events[0]["text"], "internal reasoning");
-        assert_eq!(events[0]["signature"], "sig-1");
-        assert!(!events
+        assert!(events[0]["signature"].is_null());
+        assert_eq!(events[1]["type"], "thinking_delta");
+        assert_eq!(events[1]["text"], "");
+        assert_eq!(events[1]["signature"], "sig-1");
+    }
+
+    #[test]
+    fn signed_non_empty_visible_text_emits_text_then_pending_signature_marker() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "text": "visible response",
+                            "thoughtSignature": "sig-visible"
+                        }]
+                    }
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 2);
+        assert_eq!(events[0]["type"], "text_delta");
+        assert_eq!(events[0]["text"], "visible response");
+        assert_eq!(events[1]["type"], "thinking_delta");
+        assert_eq!(events[1]["text"], "");
+        assert_eq!(events[1]["signature"], "sig-visible");
+    }
+
+    #[test]
+    fn function_call_preserves_same_part_thought_signature() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {"name": "bash", "args": {"command": "pwd"}},
+                            "thoughtSignature": "SIG"
+                        }]
+                    }
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events[0]["type"], "tool_call_start");
+        assert_eq!(events[0]["name"], "bash");
+        assert_eq!(events[0]["signature"], "SIG");
+    }
+
+    #[test]
+    fn standalone_signature_is_emitted_as_empty_thinking_delta() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {"parts": [{"thoughtSignature": "SIG"}]}
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1);
+        assert_eq!(events[0]["type"], "thinking_delta");
+        assert_eq!(events[0]["text"], "");
+        assert_eq!(events[0]["signature"], "SIG");
+    }
+
+    #[test]
+    fn empty_text_signature_is_emitted_as_empty_thinking_delta() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {"parts": [{"text": "", "thoughtSignature": "SIG"}]}
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1);
+        assert_eq!(events[0]["type"], "thinking_delta");
+        assert_eq!(events[0]["text"], "");
+        assert_eq!(events[0]["signature"], "SIG");
+    }
+
+    #[test]
+    fn parallel_function_calls_do_not_duplicate_first_signature() {
+        let chunk = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {"name": "first", "args": {}},
+                                "thoughtSignature": "SIG-A"
+                            },
+                            {"functionCall": {"name": "second", "args": {}}},
+                            {"functionCall": {"name": "third", "args": {}}}
+                        ]
+                    }
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_stream_chunk(&chunk.to_string()).unwrap()).unwrap();
+        let starts: Vec<_> = events
             .as_array()
             .unwrap()
             .iter()
-            .any(|event| event["type"] == "text_delta"));
+            .filter(|event| event["type"] == "tool_call_start")
+            .collect();
+        assert_eq!(starts.len(), 3);
+        assert_eq!(starts[0]["signature"], "SIG-A");
+        assert!(starts[1]["signature"].is_null());
+        assert!(starts[2]["signature"].is_null());
+    }
+
+    #[test]
+    fn full_response_matches_stream_signature_behavior() {
+        let response = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {"name": "bash", "args": {}},
+                            "thoughtSignature": "SIG"
+                        }]
+                    }
+                }]
+            }
+        });
+        let events: Value =
+            serde_json::from_str(&parse_full_response(&response.to_string()).unwrap()).unwrap();
+        assert_eq!(events[0]["type"], "tool_call_start");
+        assert_eq!(events[0]["signature"], "SIG");
+    }
+
+    #[test]
+    fn tool_call_history_replays_signature_as_thought_signature() {
+        let part = part_to_gemini(&json!({
+            "type": "tool_call",
+            "id": "call_1",
+            "name": "bash",
+            "arguments": "{\"command\":\"pwd\"}",
+            "signature": "SIG"
+        }))
+        .unwrap();
+        assert_eq!(part["functionCall"]["name"], "bash");
+        assert_eq!(part["functionCall"]["args"]["command"], "pwd");
+        assert_eq!(part["thoughtSignature"], "SIG");
     }
 
     #[test]
