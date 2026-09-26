@@ -101,7 +101,66 @@ fn access_token_valid(cred: &Credential, now_ms: u64) -> bool {
     }
 }
 
-fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Credential, String> {
+fn format_unix_ms_rfc3339(ms: u64) -> Option<String> {
+    const SECONDS_PER_DAY: u64 = 86_400;
+
+    let total_seconds = ms / 1_000;
+    let millis = ms % 1_000;
+    let days = i64::try_from(total_seconds / SECONDS_PER_DAY).ok()?;
+    let seconds_of_day = total_seconds % SECONDS_PER_DAY;
+
+    // Howard Hinnant's civil-from-days conversion, with Unix epoch offset.
+    let z = days.checked_add(719_468)?;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    // RFC3339's date production uses a four-digit year.
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
+    ))
+}
+
+fn lease_timing(cred: &Credential) -> (Option<String>, Option<String>) {
+    let Some(expiry_ms) = cred.expires_at_ms else {
+        return (None, None);
+    };
+
+    (
+        format_unix_ms_rfc3339(expiry_ms),
+        format_unix_ms_rfc3339(expiry_ms.saturating_sub(REFRESH_LEAD_MS)),
+    )
+}
+
+fn token_expires_at_ms(value: &serde_json::Value, now_ms: u64) -> Option<u64> {
+    value
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .map(|ttl_ms| now_ms.saturating_add(ttl_ms))
+}
+
+fn parse_token_response_at(
+    body: &str,
+    previous_refresh: Option<&str>,
+    now_ms: u64,
+) -> Result<Credential, String> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("invalid token JSON: {e}"))?;
 
@@ -119,17 +178,10 @@ fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Cr
         .map(str::to_string)
         .or_else(|| previous_refresh.map(str::to_string));
 
-    let expires_in = value
-        .get("expires_in")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(3600);
-
     Ok(Credential {
         access_token: Some(access_token),
         refresh_token,
-        expires_at_ms: Some(
-            kinetix_plugin_sdk::helpers::now_unix_millis().saturating_add(expires_in * 1000),
-        ),
+        expires_at_ms: token_expires_at_ms(&value, now_ms),
         scope: value
             .get("scope")
             .and_then(|v| v.as_str())
@@ -139,6 +191,14 @@ fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Cr
             .and_then(|v| v.as_str())
             .map(str::to_string),
     })
+}
+
+fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Credential, String> {
+    parse_token_response_at(
+        body,
+        previous_refresh,
+        kinetix_plugin_sdk::helpers::now_unix_millis(),
+    )
 }
 
 fn refresh(cred: &Credential) -> Result<Credential, PluginError> {
@@ -218,6 +278,8 @@ impl exports::credential_strategy::Guest for Component {
             persist_credential(&provider_id, &account_id, &cred)?;
         }
 
+        let (expires_at, refresh_after) = lease_timing(&cred);
+
         let access = cred
             .access_token
             .as_deref()
@@ -235,8 +297,8 @@ impl exports::credential_strategy::Guest for Component {
 
         Ok(CredentialLease {
             handle,
-            expires_at: None,
-            refresh_after: None,
+            expires_at,
+            refresh_after,
             health: "healthy".into(),
         })
     }
@@ -434,18 +496,15 @@ impl auth_world::exports::auth_flow::Guest for Component {
             })?
             .to_string();
 
-        let expires_in = value
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
+        let expires_at_ms = token_expires_at_ms(
+            &value,
+            auth_world::kinetix::plugin::host_clock::now_unix_millis(),
+        );
 
         let credential = Credential {
             access_token: Some(access_token),
             refresh_token: Some(refresh_token),
-            expires_at_ms: Some(
-                auth_world::kinetix::plugin::host_clock::now_unix_millis()
-                    .saturating_add(expires_in * 1000),
-            ),
+            expires_at_ms,
             scope: value
                 .get("scope")
                 .and_then(|v| v.as_str())
@@ -515,6 +574,104 @@ impl exports::hooks::Guest for Component {
 
     fn on_usage_finalized(_u: String) -> Result<(), PluginError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credential_with_expiry(expires_at_ms: Option<u64>) -> Credential {
+        Credential {
+            access_token: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            expires_at_ms,
+            scope: None,
+            token_type: None,
+        }
+    }
+
+    #[test]
+    fn known_expiry_produces_exact_lease_timing() {
+        let cred = credential_with_expiry(Some(1_790_438_400_000));
+
+        let (expires_at, refresh_after) = lease_timing(&cred);
+
+        assert_eq!(expires_at.as_deref(), Some("2026-09-26T16:00:00.000Z"));
+        assert_eq!(refresh_after.as_deref(), Some("2026-09-26T12:00:00.000Z"));
+    }
+
+    #[test]
+    fn missing_expiry_produces_no_lease_timing() {
+        let cred = credential_with_expiry(None);
+
+        assert_eq!(lease_timing(&cred), (None, None));
+    }
+
+    #[test]
+    fn refresh_threshold_matches_access_token_validity() {
+        let now = 1_790_400_000_000;
+        let expiry = now + 8 * 60 * 60 * 1_000;
+        let refresh_after = expiry - REFRESH_LEAD_MS;
+        let cred = credential_with_expiry(Some(expiry));
+
+        assert!(access_token_valid(&cred, refresh_after - 1));
+        assert!(!access_token_valid(&cred, refresh_after));
+        assert!(!access_token_valid(&cred, refresh_after + 1));
+    }
+
+    #[test]
+    fn short_expiry_saturates_without_underflow() {
+        let cred = credential_with_expiry(Some(60 * 60 * 1_000));
+
+        let (expires_at, refresh_after) = lease_timing(&cred);
+
+        assert_eq!(expires_at.as_deref(), Some("1970-01-01T01:00:00.000Z"));
+        assert_eq!(refresh_after.as_deref(), Some("1970-01-01T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn token_response_without_expires_in_remains_unscheduled() {
+        let now = 1_790_400_000_000;
+        let cred = parse_token_response_at(
+            r#"{"access_token":"access-b","refresh_token":"refresh-b"}"#,
+            Some("refresh-a"),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(cred.expires_at_ms, None);
+        assert!(access_token_valid(&cred, now));
+        assert_eq!(lease_timing(&cred), (None, None));
+    }
+
+    #[test]
+    fn token_response_expiry_uses_reported_expires_in() {
+        let now = 1_790_400_000_000;
+        let cred = parse_token_response_at(
+            r#"{"access_token":"access-b","refresh_token":"refresh-b","expires_in":28800}"#,
+            Some("refresh-a"),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(cred.expires_at_ms, Some(now + 8 * 60 * 60 * 1_000));
+        assert!(lease_timing(&cred).0.is_some());
+        assert!(lease_timing(&cred).1.is_some());
+    }
+
+    #[test]
+    fn out_of_range_expires_in_does_not_fabricate_expiry() {
+        let value = serde_json::json!({"expires_in": u64::MAX});
+
+        assert_eq!(token_expires_at_ms(&value, 0), None);
+    }
+
+    #[test]
+    fn out_of_range_expiry_is_not_fabricated() {
+        let cred = credential_with_expiry(Some(u64::MAX));
+
+        assert_eq!(lease_timing(&cred), (None, None));
     }
 }
 
