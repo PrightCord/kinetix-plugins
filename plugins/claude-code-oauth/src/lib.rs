@@ -587,10 +587,7 @@ mod tests {
 
         let (expires_at, refresh_after) = lease_timing(&cred);
 
-        assert_eq!(
-            expires_at.as_deref(),
-            Some("2026-09-26T16:00:00.000Z")
-        );
+        assert_eq!(expires_at.as_deref(), Some("2026-09-26T16:00:00.000Z"));
         assert_eq!(
             refresh_after.as_deref(),
             Some("2026-09-26T12:00:00.000Z")
@@ -622,10 +619,7 @@ mod tests {
 
         let (expires_at, refresh_after) = lease_timing(&cred);
 
-        assert_eq!(
-            expires_at.as_deref(),
-            Some("1970-01-01T01:00:00.000Z")
-        );
+        assert_eq!(expires_at.as_deref(), Some("1970-01-01T01:00:00.000Z"));
         assert_eq!(
             refresh_after.as_deref(),
             Some("1970-01-01T00:00:00.000Z")
