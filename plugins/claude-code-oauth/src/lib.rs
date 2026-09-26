@@ -148,7 +148,19 @@ fn lease_timing(cred: &Credential) -> (Option<String>, Option<String>) {
     )
 }
 
-fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Credential, String> {
+fn token_expires_at_ms(value: &serde_json::Value, now_ms: u64) -> Option<u64> {
+    value
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .map(|ttl_ms| now_ms.saturating_add(ttl_ms))
+}
+
+fn parse_token_response_at(
+    body: &str,
+    previous_refresh: Option<&str>,
+    now_ms: u64,
+) -> Result<Credential, String> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("invalid token JSON: {e}"))?;
 
@@ -166,17 +178,10 @@ fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Cr
         .map(str::to_string)
         .or_else(|| previous_refresh.map(str::to_string));
 
-    let expires_in = value
-        .get("expires_in")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(3600);
-
     Ok(Credential {
         access_token: Some(access_token),
         refresh_token,
-        expires_at_ms: Some(
-            kinetix_plugin_sdk::helpers::now_unix_millis().saturating_add(expires_in * 1000),
-        ),
+        expires_at_ms: token_expires_at_ms(&value, now_ms),
         scope: value
             .get("scope")
             .and_then(|v| v.as_str())
@@ -186,6 +191,14 @@ fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Cr
             .and_then(|v| v.as_str())
             .map(str::to_string),
     })
+}
+
+fn parse_token_response(body: &str, previous_refresh: Option<&str>) -> Result<Credential, String> {
+    parse_token_response_at(
+        body,
+        previous_refresh,
+        kinetix_plugin_sdk::helpers::now_unix_millis(),
+    )
 }
 
 fn refresh(cred: &Credential) -> Result<Credential, PluginError> {
@@ -483,18 +496,15 @@ impl auth_world::exports::auth_flow::Guest for Component {
             })?
             .to_string();
 
-        let expires_in = value
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
+        let expires_at_ms = token_expires_at_ms(
+            &value,
+            auth_world::kinetix::plugin::host_clock::now_unix_millis(),
+        );
 
         let credential = Credential {
             access_token: Some(access_token),
             refresh_token: Some(refresh_token),
-            expires_at_ms: Some(
-                auth_world::kinetix::plugin::host_clock::now_unix_millis()
-                    .saturating_add(expires_in * 1000),
-            ),
+            expires_at_ms,
             scope: value
                 .get("scope")
                 .and_then(|v| v.as_str())
@@ -618,6 +628,43 @@ mod tests {
 
         assert_eq!(expires_at.as_deref(), Some("1970-01-01T01:00:00.000Z"));
         assert_eq!(refresh_after.as_deref(), Some("1970-01-01T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn token_response_without_expires_in_remains_unscheduled() {
+        let now = 1_790_400_000_000;
+        let cred = parse_token_response_at(
+            r#"{"access_token":"access-b","refresh_token":"refresh-b"}"#,
+            Some("refresh-a"),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(cred.expires_at_ms, None);
+        assert!(access_token_valid(&cred, now));
+        assert_eq!(lease_timing(&cred), (None, None));
+    }
+
+    #[test]
+    fn token_response_expiry_uses_reported_expires_in() {
+        let now = 1_790_400_000_000;
+        let cred = parse_token_response_at(
+            r#"{"access_token":"access-b","refresh_token":"refresh-b","expires_in":28800}"#,
+            Some("refresh-a"),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(cred.expires_at_ms, Some(now + 8 * 60 * 60 * 1_000));
+        assert!(lease_timing(&cred).0.is_some());
+        assert!(lease_timing(&cred).1.is_some());
+    }
+
+    #[test]
+    fn out_of_range_expires_in_does_not_fabricate_expiry() {
+        let value = serde_json::json!({"expires_in": u64::MAX});
+
+        assert_eq!(token_expires_at_ms(&value, 0), None);
     }
 
     #[test]
