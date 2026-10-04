@@ -1,0 +1,61 @@
+{
+  "name": "common-generator-schema-features",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Node": {
+        "type": "object",
+        "properties": {
+          "next": {"anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}]}
+        }
+      }
+    },
+    "definitions": {
+      "Record": {"type": "object", "additionalProperties": {"type": "string", "maxLength": "40"}}
+    },
+    "properties": {
+      "patterned": {
+        "type": "object",
+        "patternProperties": {"^x": {"type": "string", "minLength": "1", "maxLength": "24", "format": "email"}},
+        "additionalProperties": {"type": "number"},
+        "minProperties": "1",
+        "maxProperties": 8
+      },
+      "tuple": {
+        "type": "array",
+        "prefixItems": [{"type": "string", "maxLength": "8"}, {"type": "integer", "exclusiveMinimum": "0"}],
+        "items": false,
+        "minItems": "2",
+        "maxItems": 2
+      },
+      "legacy_tuple": {
+        "type": "array",
+        "items": [{"type": "string"}, {"type": "number"}],
+        "additionalItems": {"type": "boolean"}
+      },
+      "dependent": {
+        "type": "object",
+        "dependentSchemas": {"name": {"required": ["code"], "properties": {"code": {"type": "string"}}}},
+        "dependencies": {"name": ["code"], "code": {"properties": {"name": {"type": "string"}}}}
+      },
+      "literal": {"const": "one", "nullable": true},
+      "typed_union": {"type": ["string", "null"]},
+      "anyof": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+      "union": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+      "intersection": {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"required": ["a"]}]},
+      "json_applicators": {
+        "if": {"properties": {"kind": {"const": "text"}}},
+        "then": {"required": ["value"]},
+        "else": {"not": {"type": "null"}},
+        "contains": {"type": "string"},
+        "minContains": "1",
+        "maxContains": 3,
+        "dependentRequired": {"name": ["code"]}
+      },
+      "recursive": {"$ref": "#/$defs/Node"},
+      "legacy_ref": {"$ref": "#/definitions/Record"},
+      "number_constraints": {"type": "number", "exclusiveMinimum": "0", "exclusiveMaximum": "10", "multipleOf": "0.5"},
+      "empty": {}
+    }
+  }
+}

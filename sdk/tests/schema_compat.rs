@@ -1,7 +1,9 @@
 use kinetix_plugin_sdk::schema::{
     translate, translate_tool_parameters,
     SchemaMode::{Compatible, Strict},
-    SchemaProfile::{self, Anthropic, Antigravity, Gemini, OpenAI, OpenAICompatible},
+    SchemaProfile::{
+        self, Anthropic, Antigravity, Gemini, OpenAI, OpenAICompatible, OpenAIResponses,
+    },
 };
 use serde_json::{json, Value};
 
@@ -34,7 +36,14 @@ fn tool_parameter_root_is_an_object_without_narrowing_nested_values() {
         json!({}),
         "generic value schemas remain unrestricted"
     );
-    for profile in [Antigravity, Gemini, OpenAI, Anthropic, OpenAICompatible] {
+    for profile in [
+        Antigravity,
+        Gemini,
+        OpenAI,
+        OpenAIResponses,
+        Anthropic,
+        OpenAICompatible,
+    ] {
         let parameters = translate_tool_parameters(
             &json!({"properties": {"state": {}, "options": {"additionalProperties": {}}}}),
             profile,
@@ -97,6 +106,11 @@ fn assert_antigravity_output(schema: &Value) {
             "contains",
             "propertyNames",
             "unevaluatedProperties",
+            "dependentSchemas",
+            "dependentRequired",
+            "dependencies",
+            "minContains",
+            "maxContains",
         ] {
             assert!(
                 !map.contains_key(keyword),
@@ -146,7 +160,7 @@ fn real_tool_corpus_matches_upstream_goldens() {
 #[test]
 fn profiles_do_not_inherit_antigravity_degradation() {
     let schema = json!({"type": "object", "patternProperties": {"^.*$": {"type": "string", "maxLength": 100, "pattern": "(?=a)a"}}, "minProperties": 1, "additionalProperties": false});
-    for profile in [Gemini, OpenAI, Anthropic, OpenAICompatible] {
+    for profile in [Gemini, OpenAI, OpenAIResponses, Anthropic, OpenAICompatible] {
         for mode in [Strict, Compatible] {
             assert_eq!(translate(&schema, profile, mode).unwrap(), schema);
         }
@@ -162,6 +176,169 @@ fn profiles_do_not_inherit_antigravity_degradation() {
     let got = ag(&schema_tail);
     assert_eq!(got["properties"]["fixed"], json!({"type": "boolean"}));
     assert!(got.get("additionalProperties").is_none());
+}
+
+#[test]
+fn standard_profiles_preserve_untyped_nested_object_keywords() {
+    let schema = json!({
+        "properties": {
+            "nested": {
+                "properties": {"value": {"type": "string"}}
+            }
+        }
+    });
+    for profile in [Gemini, OpenAI, OpenAIResponses, Anthropic, OpenAICompatible] {
+        for mode in [Strict, Compatible] {
+            assert_eq!(
+                translate(&schema, profile, mode).unwrap(),
+                schema,
+                "{profile:?} {mode:?} changed an untyped schema"
+            );
+        }
+    }
+}
+
+#[test]
+fn compatible_schema_corpus_covers_common_generator_features() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "fixtures/schema-compat/provider-compatible.json"
+    ))
+    .unwrap();
+    let schema = corpus["schema"].clone();
+
+    for profile in [Gemini, OpenAI, OpenAIResponses, Anthropic, OpenAICompatible] {
+        let translated = translate(&schema, profile, Compatible).unwrap();
+        assert_eq!(
+            translate(&schema, profile, Strict).unwrap(),
+            translated,
+            "lossless profile policy differed between modes: {profile:?}"
+        );
+        assert_eq!(
+            translated["properties"]["patterned"]["patternProperties"]["^x"]["minLength"],
+            1
+        );
+        assert_eq!(
+            translated["properties"]["patterned"]["patternProperties"]["^x"]["maxLength"],
+            24
+        );
+        assert_eq!(
+            translated["properties"]["patterned"]["patternProperties"]["^x"]["format"],
+            "email"
+        );
+        assert_eq!(translated["properties"]["patterned"]["minProperties"], 1);
+        assert_eq!(translated["properties"]["patterned"]["maxProperties"], 8);
+        assert_eq!(translated["properties"]["tuple"]["minItems"], 2);
+        assert_eq!(translated["properties"]["tuple"]["maxItems"], 2);
+        assert_eq!(
+            translated["properties"]["tuple"]["prefixItems"][0]["maxLength"],
+            8
+        );
+        assert!(translated["properties"]["tuple"]
+            .get("additionalItems")
+            .is_none());
+        assert_eq!(
+            translated["properties"]["legacy_tuple"]["items"],
+            json!([{"type":"string"},{"type":"number"}])
+        );
+        assert_eq!(
+            translated["properties"]["legacy_tuple"]["additionalItems"],
+            json!({"type":"boolean"})
+        );
+        assert_eq!(
+            translated["properties"]["dependent"]["dependentSchemas"]["name"]["required"],
+            json!(["code"])
+        );
+        assert_eq!(
+            translated["properties"]["dependent"]["dependencies"]["name"],
+            json!(["code"])
+        );
+        assert_eq!(
+            translated["properties"]["json_applicators"]["dependentRequired"]["name"],
+            json!(["code"])
+        );
+        assert!(translated["properties"]["recursive"]["$ref"].is_string());
+        assert_eq!(
+            translated["properties"]["legacy_ref"]["$ref"],
+            "#/definitions/Record"
+        );
+        assert_eq!(
+            translated["properties"]["literal"]["anyOf"][0]["enum"],
+            json!(["one"])
+        );
+        assert_eq!(
+            translated["properties"]["typed_union"]["type"],
+            json!(["string", "null"])
+        );
+        assert!(translated["properties"]["anyof"].get("anyOf").is_some());
+        assert!(translated["properties"]["union"].get("oneOf").is_some());
+        assert!(translated["properties"]["intersection"]
+            .get("allOf")
+            .is_some());
+        assert_eq!(
+            translated["properties"]["number_constraints"]["exclusiveMinimum"],
+            0
+        );
+        assert_eq!(
+            translated["properties"]["number_constraints"]["exclusiveMaximum"],
+            10
+        );
+        assert_eq!(
+            translated["properties"]["number_constraints"]["multipleOf"],
+            0.5
+        );
+        assert_eq!(translated["properties"]["empty"], json!({}));
+    }
+
+    // The structural Antigravity profile accepts lossy-compatible schemas, but
+    // recursive references are widened only at the recursive edge.
+    let antigravity = translate(&schema, Antigravity, Compatible).unwrap();
+    assert_eq!(antigravity["type"], "object");
+    assert!(antigravity["properties"]["recursive"].is_object());
+    assert!(antigravity["properties"]["patterned"]
+        .get("patternProperties")
+        .is_none());
+    assert!(translate(&schema, Antigravity, Strict).is_err());
+}
+
+#[test]
+fn numeric_string_constraints_and_legacy_exclusive_bounds_are_normalized() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": "2", "maxLength": "8"},
+            "count": {"type": "integer", "minimum": "1", "exclusiveMinimum": true},
+            "ratio": {"type": "number", "minimum": 0, "exclusiveMinimum": false}
+        }
+    });
+    let expected = json!({
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "minLength": 2, "maxLength": 8},
+            "count": {"type": "integer", "exclusiveMinimum": 1},
+            "ratio": {"type": "number", "minimum": 0}
+        }
+    });
+    for profile in [Gemini, OpenAI, OpenAIResponses, Anthropic, OpenAICompatible] {
+        for mode in [Strict, Compatible] {
+            assert_eq!(translate(&schema, profile, mode).unwrap(), expected);
+        }
+    }
+    assert!(translate(&schema, Antigravity, Strict).is_err());
+}
+
+#[test]
+fn unknown_keywords_inside_discarded_definitions_fail_closed() {
+    let schema = json!({
+        "$defs": {"unused": {"providerMagic": true}},
+        "type": "object",
+        "properties": {"value": {"type": "string"}}
+    });
+    for mode in [Strict, Compatible] {
+        assert!(translate(&schema, Antigravity, mode)
+            .unwrap_err()
+            .message
+            .contains("unknown JSON Schema keyword 'providerMagic'"));
+    }
 }
 
 #[test]
@@ -207,16 +384,28 @@ fn local_refs_are_inlined_and_cycles_fail_closed() {
         ag(&schema),
         json!({"type": "object", "properties": {"v": {"type": "string", "description": "value"}}})
     );
-    for reference in ["#/$defs/missing", "https://example.org/s.json", "#"] {
+    for reference in ["#/$defs/missing", "https://example.org/s.json"] {
         let schema = json!({"$ref": reference});
         for mode in [Strict, Compatible] {
             assert!(translate(&schema, Antigravity, mode).is_err());
         }
     }
+    let root_cycle = json!({"$ref": "#"});
+    assert!(translate(&root_cycle, Antigravity, Strict).is_err());
+    assert_eq!(
+        translate(&root_cycle, Antigravity, Compatible).unwrap(),
+        json!({})
+    );
+
     let recursive = json!({"type": "object", "properties": {"next": {"$ref": "#"}}});
-    for profile in [Gemini, OpenAI, Anthropic, OpenAICompatible] {
+    for profile in [Gemini, OpenAI, OpenAIResponses, Anthropic, OpenAICompatible] {
         assert_eq!(translate(&recursive, profile, Strict).unwrap(), recursive);
     }
+    let widened = translate(&recursive, Antigravity, Compatible).unwrap();
+    assert_eq!(
+        widened["properties"]["next"]["properties"]["next"],
+        json!({})
+    );
     let scoped = json!({"properties": {"v": {"$id": "nested", "$ref": "#/$defs/v"}}, "$defs": {"v": {"type": "string"}}});
     assert!(translate(&scoped, Antigravity, Compatible).is_err());
 }

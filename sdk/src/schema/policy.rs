@@ -26,6 +26,8 @@ pub enum SchemaProfile {
     Gemini,
     /// Non-strict function parameters; upstream strict-output rules are separate.
     OpenAI,
+    /// Responses API function parameters.
+    OpenAIResponses,
     /// Non-strict input_schema; does not inherit Gemini degradation.
     Anthropic,
     /// JSON Schema protocol baseline. Endpoint-specific extensions need a new profile.

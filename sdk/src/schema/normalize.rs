@@ -6,10 +6,11 @@ pub(super) fn normalize(
     profile: SchemaProfile,
     mode: SchemaMode,
 ) -> Result<Value, SchemaError> {
+    let policy = *profile.policy();
     // Inline only for a surface that cannot carry refs. Other JSON profiles retain
     // refs/defs, including recursive schemas, rather than degrade them.
-    let mut out = if profile == SchemaProfile::Antigravity {
-        inline(schema, schema, "$", 0, &mut 0, &mut Vec::new())?
+    let mut out = if profile.inlines_local_refs() {
+        inline(schema, schema, mode, "$", 0, &mut 0, &mut Vec::new())?
     } else {
         schema.clone()
     };
@@ -21,46 +22,67 @@ pub(super) fn normalize(
                 Err(error(path, "schema nodes must be JSON objects or booleans"))
             };
         };
-        for key in [
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
-            "multipleOf",
-            "minLength",
-            "maxLength",
-            "minItems",
-            "maxItems",
-            "minProperties",
-            "maxProperties",
-            "minContains",
-            "maxContains",
-        ] {
-            if let Some(Value::String(value)) = map.get(key) {
-                let number: Value = serde_json::from_str(value)
-                    .map_err(|_| error(&format!("{path}.{key}"), "invalid numeric string"))?;
-                if !number.is_number() {
-                    return Err(error(&format!("{path}.{key}"), "invalid numeric string"));
+        if policy.coerce_numeric_strings {
+            for key in [
+                "minimum",
+                "maximum",
+                "exclusiveMinimum",
+                "exclusiveMaximum",
+                "multipleOf",
+                "minLength",
+                "maxLength",
+                "minItems",
+                "maxItems",
+                "minProperties",
+                "maxProperties",
+                "minContains",
+                "maxContains",
+            ] {
+                if let Some(Value::String(value)) = map.get(key) {
+                    let number: Value = serde_json::from_str(value)
+                        .map_err(|_| error(&format!("{path}.{key}"), "invalid numeric string"))?;
+                    if !number.is_number() {
+                        return Err(error(&format!("{path}.{key}"), "invalid numeric string"));
+                    }
+                    map.insert(key.into(), number);
                 }
-                map.insert(key.into(), number);
             }
         }
-        if let Some(kind) = map.get_mut("type") {
-            match kind {
-                Value::String(kind) => normalize_type(kind),
-                Value::Array(types) => {
-                    for value in types.iter_mut() {
-                        if let Some(kind) = value.as_str() {
-                            let mut kind = kind.to_string();
-                            normalize_type(&mut kind);
-                            *value = json!(kind);
+        for (exclusive, bound) in [
+            ("exclusiveMinimum", "minimum"),
+            ("exclusiveMaximum", "maximum"),
+        ] {
+            if let Some(Value::Bool(enabled)) = map.get(exclusive) {
+                if *enabled {
+                    if let Some(bound) = map.remove(bound) {
+                        map.insert(exclusive.into(), bound);
+                    } else {
+                        map.remove(exclusive);
+                    }
+                } else {
+                    map.remove(exclusive);
+                }
+            }
+        }
+        if policy.normalize_type_aliases {
+            if let Some(kind) = map.get_mut("type") {
+                match kind {
+                    Value::String(kind) => normalize_type(kind),
+                    Value::Array(types) => {
+                        for value in types.iter_mut() {
+                            if let Some(kind) = value.as_str() {
+                                let mut kind = kind.to_string();
+                                normalize_type(&mut kind);
+                                *value = json!(kind);
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-        if !map.contains_key("type")
+        if profile.needs_structure()
+            && !map.contains_key("type")
             && (map.contains_key("properties") || map.contains_key("patternProperties"))
         {
             map.insert("type".into(), json!("object"));
@@ -135,6 +157,7 @@ fn normalize_type(kind: &mut String) {
 fn inline(
     node: &Value,
     root: &Value,
+    mode: SchemaMode,
     path: &str,
     depth: usize,
     nodes: &mut usize,
@@ -159,13 +182,18 @@ fn inline(
                 ));
             }
             if active.iter().any(|r| r == reference) {
-                return Err(error(path, "recursive $ref cannot be inlined safely"));
+                return match mode {
+                    SchemaMode::Strict => {
+                        Err(error(path, "recursive $ref cannot be inlined losslessly"))
+                    }
+                    SchemaMode::Compatible => Ok(json!({})),
+                };
             }
             let target = root
                 .pointer(&reference[1..])
                 .ok_or_else(|| error(path, format!("unresolved $ref '{reference}'")))?;
             active.push(reference.into());
-            let target = inline(target, root, path, depth + 1, nodes, active)?;
+            let target = inline(target, root, mode, path, depth + 1, nodes, active)?;
             active.pop();
             let siblings = Value::Object(std::mem::take(map));
             out = if siblings.as_object().unwrap().is_empty() {
@@ -176,7 +204,7 @@ fn inline(
         }
     }
     walk::children(&mut out, path, |child, path| {
-        *child = inline(child, root, path, depth + 1, nodes, active)?;
+        *child = inline(child, root, mode, path, depth + 1, nodes, active)?;
         Ok(())
     })?;
     Ok(out)

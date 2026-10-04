@@ -105,3 +105,4 @@ pub mod integration_capabilities;
 pub mod model_capabilities;
 pub mod oauth;
 pub mod schema;
+pub mod tool_names;

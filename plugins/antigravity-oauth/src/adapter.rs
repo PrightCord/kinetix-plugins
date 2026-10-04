@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use kinetix_plugin_sdk::schema::{self, SchemaMode, SchemaProfile};
+use kinetix_plugin_sdk::tool_names::ToolNameMap;
 use serde_json::{json, Map, Value};
 
 /// The IDE fingerprint Antigravity expects (macOS on purpose, even on Linux).
@@ -170,6 +171,8 @@ fn build_body_at(
                 .unwrap_or(false)
         });
 
+    let tool_names = tool_name_mapping(&req)?;
+    let tool_call_names = tool_call_names(&req);
     let mut contents = Vec::new();
     if let Some(messages) = req.get("messages").and_then(Value::as_array) {
         for message in messages {
@@ -184,9 +187,7 @@ fn build_body_at(
             let mut parts = Vec::new();
             if let Some(items) = message.get("parts").and_then(Value::as_array) {
                 for part in items {
-                    if let Some(part) = part_to_gemini(part) {
-                        parts.push(part);
-                    }
+                    parts.extend(part_to_gemini(part, &tool_names, &tool_call_names)?);
                 }
             }
             if !parts.is_empty() {
@@ -221,7 +222,7 @@ fn build_body_at(
     }
     apply_thinking(&mut generation_config, &req, &upstream_model)?;
 
-    let declarations = build_tool_declarations(&req, &provider)?;
+    let declarations = build_tool_declarations_with_names(&req, &provider, &tool_names)?;
 
     let mut request = Map::new();
     request.insert("contents".into(), Value::Array(contents));
@@ -234,7 +235,7 @@ fn build_body_at(
             "tools".into(),
             json!([{ "functionDeclarations": declarations }]),
         );
-        if let Some(config) = build_tool_config(&req)? {
+        if let Some(config) = build_tool_config_with_names(&req, &tool_names)? {
             request.insert("toolConfig".into(), config);
         }
     }
@@ -532,17 +533,84 @@ fn apply_thinking(
     )))
 }
 
+fn tool_name_mapping(req: &Value) -> Result<ToolNameMap, AdapterError> {
+    let mut names = Vec::new();
+    if let Some(tools) = req.get("tools").and_then(Value::as_array) {
+        for (index, tool) in tools.iter().enumerate() {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| bad(format!("tools[{index}] requires a non-empty name")))?;
+            names.push(name);
+        }
+    }
+    if let Some(name) = req.pointer("/tool_choice/name").and_then(Value::as_str) {
+        names.push(name);
+    }
+    if let Some(messages) = req.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(parts) = message.get("parts").and_then(Value::as_array) {
+                for part in parts {
+                    if matches!(
+                        part.get("type").and_then(Value::as_str),
+                        Some("tool_call" | "tool_result")
+                    ) {
+                        if let Some(name) = part.get("name").and_then(Value::as_str) {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ToolNameMap::new(names).map_err(|error| bad(error.to_string()))
+}
+
+fn tool_call_names(req: &Value) -> HashMap<String, String> {
+    let mut calls = HashMap::new();
+    if let Some(messages) = req.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(parts) = message.get("parts").and_then(Value::as_array) {
+                for part in parts {
+                    if part.get("type").and_then(Value::as_str) == Some("tool_call") {
+                        if let (Some(id), Some(name)) = (
+                            part.get("id").and_then(Value::as_str),
+                            part.get("name").and_then(Value::as_str),
+                        ) {
+                            calls.insert(id.to_owned(), name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    calls
+}
+
+#[cfg(test)]
 fn build_tool_declarations(req: &Value, provider: &Value) -> Result<Vec<Value>, AdapterError> {
+    let tool_names = tool_name_mapping(req)?;
+    build_tool_declarations_with_names(req, provider, &tool_names)
+}
+
+fn build_tool_declarations_with_names(
+    req: &Value,
+    provider: &Value,
+    tool_names: &ToolNameMap,
+) -> Result<Vec<Value>, AdapterError> {
     let mode = schema_mode(provider)?;
     let mut declarations = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     if let Some(tools) = req.get("tools").and_then(Value::as_array) {
         for tool in tools {
-            let name =
-                sanitize_function_name(tool.get("name").and_then(Value::as_str).unwrap_or(""));
-            if !seen.insert(name.clone()) {
-                continue;
+            let client_name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+            if !seen.insert(client_name) {
+                return Err(bad(format!("duplicate tool name '{client_name}'")));
             }
+            let name = tool_names
+                .to_wire(client_name)
+                .map_err(|error| bad(error.to_string()))?;
             let parameters = tool
                 .get("parameters")
                 .cloned()
@@ -551,14 +619,23 @@ fn build_tool_declarations(req: &Value, provider: &Value) -> Result<Vec<Value>, 
                 "name": name,
                 "description": tool.get("description").cloned().unwrap_or(Value::Null),
                 "parametersJsonSchema": schema::translate_tool_parameters(&parameters, SchemaProfile::Antigravity, mode)
-                    .map_err(|error| tool_schema_error(error, tool.get("name").and_then(Value::as_str).unwrap_or("")))?,
+                    .map_err(|error| tool_schema_error(error, client_name))?,
             }));
         }
     }
     Ok(declarations)
 }
 
+#[cfg(test)]
 fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
+    let tool_names = tool_name_mapping(req)?;
+    build_tool_config_with_names(req, &tool_names)
+}
+
+fn build_tool_config_with_names(
+    req: &Value,
+    tool_names: &ToolNameMap,
+) -> Result<Option<Value>, AdapterError> {
     let mode = req
         .pointer("/tool_choice/mode")
         .and_then(Value::as_str)
@@ -573,9 +650,12 @@ fn build_tool_config(req: &Value) -> Result<Option<Value>, AdapterError> {
                 .and_then(Value::as_str)
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| bad("specific tool choice requires a tool name"))?;
+            let wire_name = tool_names
+                .to_wire(name)
+                .map_err(|error| bad(error.to_string()))?;
             json!({
                 "mode": "ANY",
-                "allowedFunctionNames": [sanitize_function_name(name)]
+                "allowedFunctionNames": [wire_name]
             })
         }
         other => return Err(bad(format!("unsupported canonical tool choice '{other}'"))),
@@ -661,33 +741,6 @@ fn build_request_id(session_id: Option<&str>, model: &str, ts: u64) -> String {
     format!("agent/{conversation}/{ts}/{trajectory}/1")
 }
 
-/// Gemini function-name rule: `[a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}`.
-fn sanitize_function_name(name: &str) -> String {
-    if name.is_empty() {
-        return "_unknown".to_string();
-    }
-    let mut s: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if !s
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_alphabetic() || c == '_')
-        .unwrap_or(false)
-    {
-        s.insert(0, '_');
-    }
-    s.truncate(64);
-    s
-}
-
 fn tool_schema_error(error: schema::SchemaError, name: &str) -> AdapterError {
     bad(format!(
         "Antigravity tool schema at tool '{name}'{}: {}",
@@ -720,65 +773,309 @@ fn sanitize_schema_with_policy(
     })
 }
 
-/// Convert one internal part to a Gemini part.
-fn part_to_gemini(p: &Value) -> Option<Value> {
-    match p.get("type").and_then(|t| t.as_str())? {
-        "text" => Some(json!({ "text": p.get("text").and_then(|t| t.as_str()).unwrap_or("") })),
+/// Convert one internal part to zero or more Gemini parts.
+fn part_to_gemini(
+    p: &Value,
+    tool_names: &ToolNameMap,
+    tool_call_names: &HashMap<String, String>,
+) -> Result<Vec<Value>, AdapterError> {
+    let Some(kind) = p.get("type").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let part = match kind {
+        "text" => json!({ "text": p.get("text").and_then(Value::as_str).unwrap_or("") }),
         "thinking" => {
             let mut part = json!({
                 "thought": true,
-                "text": p.get("text").and_then(|t| t.as_str()).unwrap_or("")
+                "text": p.get("text").and_then(Value::as_str).unwrap_or("")
             });
             if let Some(signature) = p.get("signature").and_then(Value::as_str) {
                 part["thoughtSignature"] = json!(signature);
             }
-            Some(part)
+            part
         }
-        "image" => Some(json!({
-            "inlineData": {
-                "mimeType": p.get("mime").and_then(|m| m.as_str()).unwrap_or("image/png"),
-                "data": p.get("data").and_then(|d| d.as_str()).unwrap_or("")
-            }
-        })),
-        "image_url" => Some(json!({
-            "fileData": { "fileUri": p.get("url").and_then(|u| u.as_str()).unwrap_or("") }
-        })),
+        "image" | "document" => media_part(p, kind)?,
+        "image_url" | "document_url" => media_part(p, kind)?,
         "tool_call" => {
-            let name = sanitize_function_name(p.get("name").and_then(|n| n.as_str()).unwrap_or(""));
-            let args: Value = p
-                .get("arguments")
-                .and_then(|a| a.as_str())
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(|| json!({}));
+            let client_name = p
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| bad("historical tool call requires a non-empty name"))?;
+            let name = tool_names
+                .to_wire(client_name)
+                .map_err(|error| bad(error.to_string()))?;
+            let args = parse_tool_arguments(p.get("arguments"))?;
             let mut function_call = json!({ "name": name, "args": args });
             if let Some(id) = p.get("id").and_then(Value::as_str) {
                 function_call["id"] = json!(id);
             }
             let mut part = json!({ "functionCall": function_call });
-            if let Some(sig) = p.get("signature").and_then(|s| s.as_str()) {
-                part["thoughtSignature"] = json!(sig);
+            if let Some(signature) = p.get("signature").and_then(Value::as_str) {
+                part["thoughtSignature"] = json!(signature);
             }
-            Some(part)
+            part
         }
         "tool_result" => {
-            let name = sanitize_function_name(p.get("name").and_then(|n| n.as_str()).unwrap_or(""));
-            let content = p.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            let response = if p.get("is_error").and_then(Value::as_bool) == Some(true) {
-                json!({ "error": content })
-            } else {
-                json!({ "result": content })
-            };
-            let mut function_response = json!({
-                "name": name,
-                "response": response
-            });
-            if let Some(id) = p.get("tool_call_id").and_then(Value::as_str) {
-                function_response["id"] = json!(id);
-            }
-            Some(json!({ "functionResponse": function_response }))
+            let id = p.get("tool_call_id").and_then(Value::as_str).unwrap_or("");
+            let client_name = p
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .or_else(|| tool_call_names.get(id).map(String::as_str))
+                .ok_or_else(|| bad("tool result requires a name matching its tool call"))?;
+            let name = tool_names
+                .to_wire(client_name)
+                .map_err(|error| bad(error.to_string()))?;
+            tool_result_part(p, name, id)?
         }
-        _ => None,
+        _ => return Ok(Vec::new()),
+    };
+    Ok(match part {
+        Value::Array(parts) => parts,
+        part => vec![part],
+    })
+}
+
+fn parse_tool_arguments(value: Option<&Value>) -> Result<Value, AdapterError> {
+    let Some(value) = value else {
+        return Ok(json!({}));
+    };
+    let arguments = match value {
+        Value::String(text) => serde_json::from_str(text)
+            .map_err(|error| bad(format!("invalid historical tool-call JSON: {error}")))?,
+        Value::Object(_) => value.clone(),
+        _ => {
+            return Err(bad(
+                "historical tool-call arguments must be an object or JSON object string",
+            ))
+        }
+    };
+    if arguments.is_object() {
+        Ok(arguments)
+    } else {
+        Err(bad("historical tool-call arguments must be a JSON object"))
     }
+}
+
+fn media_part(part: &Value, kind: &str) -> Result<Value, AdapterError> {
+    let file_kind = kind.ends_with("_url");
+    let uri = part
+        .get("url")
+        .or_else(|| part.get("uri"))
+        .and_then(Value::as_str)
+        .filter(|uri| !uri.is_empty());
+    if file_kind || uri.is_some() {
+        let uri = uri.ok_or_else(|| unsupported_media(kind, "missing a file URI"))?;
+        let mut file_data = json!({ "fileUri": uri });
+        if let Some(mime) = part.get("mime").and_then(Value::as_str) {
+            file_data["mimeType"] = json!(mime);
+        }
+        return Ok(json!({ "fileData": file_data }));
+    }
+    let mime = part
+        .get("mime")
+        .and_then(Value::as_str)
+        .filter(|mime| !mime.is_empty())
+        .ok_or_else(|| unsupported_media(kind, "missing a MIME type"))?;
+    let data = part
+        .get("data")
+        .and_then(Value::as_str)
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| unsupported_media(kind, "missing inline data"))?;
+    Ok(json!({ "inlineData": { "mimeType": mime, "data": data } }))
+}
+
+fn unsupported_media(kind: &str, reason: &str) -> AdapterError {
+    err(
+        "unsupported_media",
+        format!("Antigravity cannot translate {kind} tool-result media: {reason}"),
+    )
+}
+
+fn valid_mime_type(value: &str) -> bool {
+    let Some((media_type, subtype)) = value.split_once('/') else {
+        return false;
+    };
+    let is_token = |token: &str| {
+        !token.is_empty()
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    };
+    !subtype.contains('/') && is_token(media_type) && is_token(subtype)
+}
+
+fn tool_result_media_part(part: &Value, kind: &str) -> Result<Value, AdapterError> {
+    let source = part.get("source").unwrap_or(&Value::Null);
+    let source_type = source.get("type").and_then(Value::as_str);
+    if kind.ends_with("_url")
+        || part.get("url").is_some()
+        || part.get("uri").is_some()
+        || source_type == Some("url")
+        || source.get("url").is_some()
+    {
+        return Err(unsupported_media(
+            kind,
+            "URI media is not supported in Gemini function responses",
+        ));
+    }
+
+    if source.is_object() && source_type != Some("base64") {
+        return Err(unsupported_media(
+            kind,
+            "only base64-backed sources are supported in Gemini function responses",
+        ));
+    }
+
+    let mime = part
+        .get("mime")
+        .or_else(|| source.get("media_type"))
+        .and_then(Value::as_str)
+        .filter(|mime| valid_mime_type(mime))
+        .ok_or_else(|| unsupported_media(kind, "missing or invalid MIME type"))?;
+    let data = part
+        .get("data")
+        .or_else(|| source.get("data"))
+        .and_then(Value::as_str)
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| unsupported_media(kind, "missing inline data"))?;
+    Ok(json!({ "inlineData": { "mimeType": mime, "data": data } }))
+}
+
+fn is_tool_result_content_part(part: &Value) -> bool {
+    let Some(object) = part.as_object() else {
+        return false;
+    };
+    let Some(kind) = object.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    let has_any = |keys: &[&str]| keys.iter().any(|key| object.contains_key(*key));
+    let has_string = |keys: &[&str]| {
+        keys.iter()
+            .any(|key| object.get(*key).is_some_and(Value::is_string))
+    };
+    let source = object.get("source").and_then(Value::as_object);
+    let source_has_string = |keys: &[&str]| {
+        source.is_some_and(|source| {
+            keys.iter()
+                .any(|key| source.get(*key).is_some_and(Value::is_string))
+        })
+    };
+
+    match kind {
+        "text" => object.get("text").is_some_and(Value::is_string),
+        "json" | "structured" | "structured_json" => has_any(&["json", "value", "data"]),
+        "image" | "document" | "audio" | "video" => {
+            has_string(&["data", "url", "uri"]) || source_has_string(&["data", "url", "uri"])
+        }
+        "image_url" | "document_url" | "audio_url" | "video_url" => {
+            has_string(&["url", "uri"]) || source_has_string(&["url", "uri"])
+        }
+        _ => false,
+    }
+}
+
+fn is_tool_result_content_parts(parts: &[Value]) -> bool {
+    !parts.is_empty() && parts.iter().all(is_tool_result_content_part)
+}
+
+fn tool_result_part(p: &Value, name: &str, id: &str) -> Result<Value, AdapterError> {
+    let mut media = Vec::new();
+    let mut text = Vec::new();
+    let mut structured = p
+        .get("structured_content")
+        .or_else(|| p.get("structuredContent"))
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(content) = p.get("content") {
+        match content {
+            Value::String(value) => text.push(value.clone()),
+            Value::Object(_) => structured.push(content.clone()),
+            Value::Array(parts) if is_tool_result_content_parts(parts) => {
+                for part in parts {
+                    match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                        "text" => {
+                            if let Some(value) = part.get("text").and_then(Value::as_str) {
+                                text.push(value.to_owned());
+                            }
+                        }
+                        "json" | "structured" | "structured_json" => {
+                            structured.push(
+                                part.get("json")
+                                    .or_else(|| part.get("value"))
+                                    .or_else(|| part.get("data"))
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        bad("structured tool-result part has no JSON value")
+                                    })?,
+                            );
+                        }
+                        kind @ ("image" | "image_url" | "document" | "document_url") => {
+                            media.push(tool_result_media_part(part, kind)?);
+                        }
+                        _ => return Err(unsupported_media("unknown", "unrecognized content part")),
+                    }
+                }
+            }
+            Value::Array(_) => structured.push(content.clone()),
+            Value::Null => structured.push(Value::Null),
+            _ => structured.push(content.clone()),
+        }
+    }
+    let structured = match structured.len() {
+        0 => None,
+        1 => structured.pop(),
+        _ => Some(json!({"structured_parts": structured})),
+    };
+    let has_structured = structured.is_some();
+    let is_error = p.get("is_error").and_then(Value::as_bool) == Some(true);
+    let response = if is_error {
+        match structured {
+            Some(structured) if !text.is_empty() => {
+                json!({ "error": structured, "text": text.join("") })
+            }
+            Some(structured) => json!({ "error": structured }),
+            None => json!({ "error": text.join("") }),
+        }
+    } else {
+        let mut object = match structured {
+            Some(Value::Object(object)) => object,
+            Some(value) => {
+                let mut object = Map::new();
+                object.insert("result".into(), value);
+                object
+            }
+            None => Map::new(),
+        };
+        if !text.is_empty() {
+            let key = if !object.contains_key("result") {
+                "result".to_owned()
+            } else if !object.contains_key("text") {
+                "text".to_owned()
+            } else {
+                let mut index = 1;
+                while object.contains_key(&format!("_kinetix_text_{index}")) {
+                    index += 1;
+                }
+                format!("_kinetix_text_{index}")
+            };
+            object.insert(key, json!(text.join("")));
+        }
+        if object.is_empty() && !has_structured {
+            object.insert("result".into(), json!(""));
+        }
+        Value::Object(object)
+    };
+    let mut function_response = json!({ "name": name, "response": response });
+    if !id.is_empty() {
+        function_response["id"] = json!(id);
+    }
+    if !media.is_empty() {
+        function_response["parts"] = Value::Array(media);
+    }
+    Ok(json!({ "functionResponse": function_response }))
 }
 
 // ---------------------------------------------------------------------------
@@ -974,10 +1271,10 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
 
                     if let Some(fc) = function_call {
                         candidate_has_tool_calls = true;
-                        let name = sanitize_function_name(
-                            fc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                        );
-                        let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+                        let wire_name = fc.get("name").and_then(Value::as_str).unwrap_or("");
+                        let name = ToolNameMap::from_wire(wire_name)
+                            .map_err(|error| bad(error.to_string()))?;
+                        let args = parse_tool_arguments(fc.get("args"))?;
                         events.push(json!({
                             "type": "tool_call_start",
                             "index": tool_index,
@@ -1027,18 +1324,22 @@ pub fn parse_stream_chunk(data: &str) -> Result<String, AdapterError> {
 }
 
 pub fn parse_full_response(body_json: &str) -> Result<String, AdapterError> {
-    let v: Value = serde_json::from_str(body_json).unwrap_or(Value::Null);
+    let v: Value = serde_json::from_str(body_json)
+        .map_err(|error| bad(format!("bad full response json: {error}")))?;
     let resp = v.get("response").unwrap_or(&v);
     // Reuse the streaming parser on a synthesized single chunk.
     parse_stream_chunk(&resp.to_string())
 }
 
 fn map_finish(reason: &str, has_tool_calls: bool) -> &'static str {
-    match reason {
-        "STOP" if has_tool_calls => "tool_calls",
-        "STOP" => "stop",
-        "MAX_TOKENS" => "length",
-        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => "content_filter",
+    match reason.to_ascii_uppercase().as_str() {
+        "STOP" | "STOP_SEQUENCE" if has_tool_calls => "tool_calls",
+        "STOP" | "STOP_SEQUENCE" => "stop",
+        "MAX_TOKENS" | "LENGTH" => "length",
+        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "CONTENT_FILTER" => {
+            "content_filter"
+        }
+        "TOOL_CALLS" | "FUNCTION_CALL" => "tool_calls",
         _ => "stop",
     }
 }
@@ -1422,7 +1723,7 @@ mod tests {
             json!({
                 "functionCallingConfig": {
                     "mode": "ANY",
-                    "allowedFunctionNames": ["read_file_"]
+                    "allowedFunctionNames": ["_ktx_726561642066696c6521"]
                 }
             })
         );
@@ -2194,29 +2495,193 @@ mod tests {
         assert_eq!(events[0]["signature"], "SIG");
     }
 
+    fn convert_part(part: &Value) -> Value {
+        let names = part
+            .get("name")
+            .and_then(Value::as_str)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let tool_names = ToolNameMap::new(names).unwrap();
+        part_to_gemini(part, &tool_names, &HashMap::new())
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
     #[test]
     fn tool_call_history_replays_signature_as_thought_signature() {
-        let part = part_to_gemini(&json!({
+        let part = convert_part(&json!({
             "type": "tool_call",
             "id": "call_1",
             "name": "bash",
             "arguments": "{\"command\":\"pwd\"}",
             "signature": "SIG"
-        }))
-        .unwrap();
+        }));
         assert_eq!(part["functionCall"]["name"], "bash");
         assert_eq!(part["functionCall"]["args"]["command"], "pwd");
         assert_eq!(part["thoughtSignature"], "SIG");
     }
 
     #[test]
+    fn tool_names_round_trip_without_sanitizing_collisions() {
+        let req = json!({
+            "tools": [
+                {"name": "read file!", "parameters": {"type": "object", "properties": {}}},
+                {"name": "read_file_", "parameters": {"type": "object", "properties": {}}},
+                {"name": "?read file!", "parameters": {"type": "object", "properties": {}}}
+            ],
+            "tool_choice": {"mode": "specific", "name": "read file!"},
+            "messages": [{"role": "assistant", "parts": [{
+                "type": "tool_call", "id": "call_1", "name": "read file!", "arguments": "{}"
+            }]}]
+        });
+        let names = tool_name_mapping(&req).unwrap();
+        let declarations = build_tool_declarations(&req, &json!({})).unwrap();
+        let wire_names = declarations
+            .iter()
+            .map(|declaration| declaration["name"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(wire_names.len(), 3);
+        assert!(wire_names.iter().all(|name| name.len() <= 64));
+        for name in ["read file!", "read_file_", "?read file!"] {
+            assert_eq!(
+                ToolNameMap::from_wire(names.to_wire(name).unwrap()).unwrap(),
+                name
+            );
+        }
+        let config = build_tool_config(&req).unwrap().unwrap();
+        assert_eq!(
+            config["functionCallingConfig"]["allowedFunctionNames"][0],
+            names.to_wire("read file!").unwrap()
+        );
+
+        let wire = names.to_wire("read file!").unwrap();
+        let events: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                &json!({
+                    "response": {"candidates": [{"content": {"parts": [{
+                        "functionCall": {"name": wire, "args": r#"{"path":"src"}"#}
+                    }]}, "finishReason": "FUNCTION_CALL", "safeUnknownField": true}]}
+                })
+                .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(events[0]["name"], "read file!");
+        assert_eq!(events[1]["args"], "{\"path\":\"src\"}");
+        assert_eq!(events[2]["reason"], "tool_calls");
+    }
+
+    #[test]
+    fn antigravity_thinking_tool_result_next_message_continuation() {
+        let request: Value = serde_json::from_str(include_str!(
+            "../../../wit/fixtures/plugin-request/v1/antigravity-tool-result-multimodal.json"
+        ))
+        .unwrap();
+        let body: Value = serde_json::from_str(
+            &build_body_at(
+                &request.to_string(),
+                r#"{"_kinetix":{"project_id":"project"}}"#,
+                r#"{"upstream_id":"gemini-3.7-flash"}"#,
+                None,
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let wire_name = body["request"]["tools"][0]["functionDeclarations"][0]["name"].clone();
+        assert_eq!(
+            body["request"]["toolConfig"]["functionCallingConfig"]["mode"],
+            "VALIDATED"
+        );
+        assert_eq!(wire_name, "bash");
+        let contents = body["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 3);
+        assert_eq!(contents[0]["parts"][0]["thought"], true);
+        assert_eq!(
+            contents[0]["parts"][0]["thoughtSignature"],
+            "opaque-signature"
+        );
+        assert_eq!(contents[0]["parts"][1]["functionCall"]["name"], wire_name);
+        assert!(contents[0]["parts"][1].get("thoughtSignature").is_none());
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            wire_name
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["exit_code"],
+            0
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["result"],
+            "done"
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["parts"][0]["inlineData"]["data"],
+            "QUJD"
+        );
+        assert_eq!(contents[2]["parts"][0]["text"], "next message");
+
+        let events: Value = serde_json::from_str(
+            &parse_stream_chunk(
+                &json!({
+                    "response": {"candidates": [{"content": {"parts": [{
+                        "functionCall": {"name": wire_name, "args": {"command": "pwd"}}
+                    }]}}]}
+                })
+                .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(events[0]["name"], "bash");
+        assert_eq!(events[1]["args"], "{\"command\":\"pwd\"}");
+    }
+
+    #[test]
+    fn structured_error_tool_result_preserves_explanatory_text() {
+        let names = ToolNameMap::new(["read"]).unwrap();
+        let calls = HashMap::from([("call_1".to_string(), "read".to_string())]);
+        let result = json!({
+            "type": "tool_result", "tool_call_id": "call_1", "name": "read",
+            "is_error": true,
+            "content": [
+                {"type": "text", "text": "permission denied"},
+                {"type": "json", "value": {"code": "EACCES"}}
+            ]
+        });
+        let translated = part_to_gemini(&result, &names, &calls).unwrap();
+        assert_eq!(
+            translated[0]["functionResponse"]["response"]["error"],
+            json!({"code":"EACCES"})
+        );
+        assert_eq!(
+            translated[0]["functionResponse"]["response"]["text"],
+            "permission denied"
+        );
+    }
+
+    #[test]
+    fn unsupported_tool_result_media_returns_compatibility_error() {
+        let names = ToolNameMap::new(["read"]).unwrap();
+        let calls = HashMap::from([("call_1".to_string(), "read".to_string())]);
+        let result = json!({
+            "type": "tool_result", "tool_call_id": "call_1",
+            "content": [{"type": "audio", "mime": "audio/wav", "data": "AA=="}]
+        });
+        let error = part_to_gemini(&result, &names, &calls).unwrap_err();
+        assert_eq!(error.code, "unsupported_media");
+    }
+
+    #[test]
     fn thinking_history_preserves_signature() {
-        let part = part_to_gemini(&json!({
+        let part = convert_part(&json!({
             "type": "thinking",
             "text": "",
             "signature": "sig-1"
-        }))
-        .unwrap();
+        }));
         assert_eq!(part["thought"], true);
         assert_eq!(part["thoughtSignature"], "sig-1");
     }

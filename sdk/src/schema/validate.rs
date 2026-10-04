@@ -18,11 +18,16 @@ pub(super) fn node(
             },
             "title" | "description" | "pattern" | "format" | "$schema" | "$id" | "$anchor"
             | "$comment" | "$ref" | "contentMediaType" | "contentEncoding" => value.is_string(),
-            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => value.is_number(),
-            "multipleOf" => value.as_f64().is_some_and(|v| v > 0.0),
+            "minimum" | "maximum" => number_or_numeric_string(value),
+            "exclusiveMinimum" | "exclusiveMaximum" => {
+                number_or_numeric_string(value) || value.is_boolean()
+            }
+            "multipleOf" => numeric_value(value).is_some_and(|v| v > 0.0),
             "minLength" | "maxLength" | "minItems" | "maxItems" | "minProperties"
-            | "maxProperties" | "minContains" | "maxContains" => value.as_u64().is_some(),
+            | "maxProperties" | "minContains" | "maxContains" => unsigned_integer(value),
             "enum" => value.as_array().is_some_and(|v| !v.is_empty()),
+            "const" => true,
+            "nullable" => value.is_boolean(),
             "allOf" | "anyOf" | "oneOf" => value.as_array().is_some_and(|v| !v.is_empty()),
             "prefixItems" => value.is_array(),
             "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas"
@@ -75,6 +80,19 @@ pub(super) fn node(
     Ok(())
 }
 
+pub(super) fn validate_source(schema: &Value) -> Result<(), SchemaError> {
+    let mut checked = schema.clone();
+    walk::postorder(&mut checked, "$", 0, &mut 0, &mut |schema_node, path| {
+        if let Some(map) = schema_node.as_object() {
+            node(map, path, false)
+        } else if schema_node.is_boolean() {
+            Ok(())
+        } else {
+            Err(error(path, "schema nodes must be JSON objects or booleans"))
+        }
+    })
+}
+
 pub(super) fn validate(schema: &Value, profile: SchemaProfile) -> Result<(), SchemaError> {
     let mut checked = schema.clone();
     walk::postorder(&mut checked, "$", 0, &mut 0, &mut |node_value, path| {
@@ -86,7 +104,7 @@ pub(super) fn validate(schema: &Value, profile: SchemaProfile) -> Result<(), Sch
         };
         node(map, path, true)?;
         for key in map.keys() {
-            if feature(key).is_some_and(|feature| !profile.supports(feature)) {
+            if feature(key).is_some_and(|feature| !profile.policy().supports(feature)) {
                 return Err(error(
                     &format!("{path}.{key}"),
                     "unsupported keyword survived translation",
@@ -130,10 +148,55 @@ pub(super) fn validate(schema: &Value, profile: SchemaProfile) -> Result<(), Sch
     })
 }
 
+fn number_or_numeric_string(value: &Value) -> bool {
+    value.is_number()
+        || value.as_str().is_some_and(|value| {
+            serde_json::from_str::<Value>(value)
+                .ok()
+                .is_some_and(|value| value.is_number())
+        })
+}
+
+fn unsigned_integer(value: &Value) -> bool {
+    value.as_u64().is_some()
+        || value
+            .as_str()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .is_some_and(|value| value.as_u64().is_some())
+}
+
+fn numeric_value(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .and_then(|value| value.as_f64())
+    })
+}
+
 fn valid_type(kind: &str) -> bool {
     matches!(
-        kind,
-        "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+        kind.to_ascii_lowercase().as_str(),
+        "object"
+            | "array"
+            | "string"
+            | "str"
+            | "number"
+            | "float"
+            | "double"
+            | "integer"
+            | "int"
+            | "int32"
+            | "int64"
+            | "uint32"
+            | "uint64"
+            | "sint32"
+            | "sint64"
+            | "fixed32"
+            | "fixed64"
+            | "boolean"
+            | "bool"
+            | "null"
     )
 }
 fn strings(value: &Value) -> bool {

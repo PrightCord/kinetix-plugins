@@ -1,0 +1,92 @@
+{
+  "schema": "kinetix.plugin.request",
+  "schema_version": 1,
+  "requested_model": "plugin-model",
+  "system": [],
+  "messages": [
+    {
+      "role": "assistant",
+      "parts": [
+        {
+          "type": "thinking",
+          "text": "checking",
+          "signature": "opaque-signature"
+        },
+        {
+          "type": "tool_call",
+          "id": "call_bash",
+          "name": "bash",
+          "arguments": "{\"command\":\"pwd\"}",
+          "signature": null
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "tool_result",
+          "tool_call_id": "call_bash",
+          "name": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "QUJD"
+              }
+            }
+          ],
+          "structured_content": {
+            "exit_code": 0
+          },
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "next message"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "bash",
+      "description": null,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "tool_choice": {
+    "mode": "auto",
+    "name": null
+  },
+  "stream": false,
+  "include_usage": false,
+  "temperature": null,
+  "top_p": null,
+  "top_k": null,
+  "max_tokens": null,
+  "stop": [],
+  "seed": null,
+  "presence_penalty": null,
+  "frequency_penalty": null,
+  "thinking": null,
+  "extra": {}
+}

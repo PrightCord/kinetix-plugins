@@ -59,6 +59,7 @@ fn translate_with_context(
     mode: SchemaMode,
     tool_parameters: bool,
 ) -> Result<Value, SchemaError> {
+    validate::validate_source(schema)?;
     let mut schema = normalize::normalize(schema, profile, mode)?;
     transform::translate(&mut schema, profile, mode)?;
     if tool_parameters {

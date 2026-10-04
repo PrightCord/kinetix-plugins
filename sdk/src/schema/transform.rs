@@ -1,6 +1,6 @@
 use super::{
     error, normalize,
-    profiles::{feature, Feature},
+    profiles::{feature, IntersectionPolicy, TuplePolicy, UnionPolicy},
     validate, walk, SchemaError, SchemaMode, SchemaProfile,
 };
 use serde_json::{json, Map, Value};
@@ -10,6 +10,7 @@ pub(super) fn translate(
     profile: SchemaProfile,
     mode: SchemaMode,
 ) -> Result<(), SchemaError> {
+    let policy = *profile.policy();
     walk::postorder(schema, "$", 0, &mut 0, &mut |node, path| {
         let Some(map) = node.as_object_mut() else {
             return Ok(());
@@ -17,7 +18,7 @@ pub(super) fn translate(
         // Validate before stripping: malformed constraints and unknown keywords
         // remain errors, even inside a constraint that will be discarded.
         validate::node(map, path, false)?;
-        if !profile.supports(Feature::Intersection) {
+        if policy.intersection == IntersectionPolicy::MergeSafely {
             if let Some(branches) = map.remove("allOf") {
                 let mut merged = Map::new();
                 for branch in branches.as_array().unwrap() {
@@ -29,7 +30,7 @@ pub(super) fn translate(
                 normalize::merge(map, merged, path)?;
             }
         }
-        if !profile.supports(Feature::ExclusiveUnion) {
+        if policy.union == UnionPolicy::WidenToAnyOf {
             if let Some(branches) = map.remove("oneOf") {
                 if map.contains_key("anyOf") {
                     return Err(error(
@@ -46,14 +47,14 @@ pub(super) fn translate(
                 map.insert("anyOf".into(), branches);
             }
         }
-        if !profile.supports(Feature::Tuple) {
+        if policy.tuple == TuplePolicy::NormalizeToHomogeneousItems {
             tuple(map, path, mode)?;
         }
         let keys: Vec<_> = map.keys().cloned().collect();
         for key in keys {
             if let Some(feature) = feature(&key) {
-                if !profile.supports(feature) {
-                    if mode == SchemaMode::Strict {
+                if !policy.supports(feature) {
+                    if mode == SchemaMode::Strict || !policy.may_drop(feature) {
                         return Err(error(
                             &format!("{path}.{key}"),
                             format!("unsupported JSON Schema keyword '{key}'"),
@@ -73,23 +74,7 @@ pub(super) fn translate(
                     map.remove(&key);
                 }
             }
-            if profile == SchemaProfile::Antigravity
-                && matches!(
-                    key.as_str(),
-                    "$schema"
-                        | "$comment"
-                        | "$id"
-                        | "$anchor"
-                        | "strict"
-                        | "encrypted"
-                        | "default"
-                        | "examples"
-                        | "example"
-                        | "deprecated"
-                        | "readOnly"
-                        | "writeOnly"
-                )
-            {
+            if policy.dropped_annotations.contains(&key.as_str()) {
                 map.remove(&key);
             }
         }

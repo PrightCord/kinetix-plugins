@@ -1327,7 +1327,9 @@ fn antigravity_model_profile(id: &str) -> AntigravityModelProfile {
     }
 
     match id {
+        "gemini-3-flash" => gemini_base_profile("google/gemini-3-flash"),
         "gemini-3.1-flash-lite" => gemini_base_profile("google/gemini-3.1-flash-lite"),
+        "gemini-3.1-pro" => gemini_base_profile("google/gemini-3.1-pro"),
         "gemini-3.1-pro-low" => {
             fixed_reasoning_variant("google/gemini-3.1-pro", "low", ReasoningLevel::Low)
         }
@@ -3305,6 +3307,23 @@ mod tests {
 
     #[test]
     fn gemini_pro_aliases_are_explicit_not_heuristic() {
+        let canonical = antigravity_model_profile("gemini-3.1-pro");
+        assert_eq!(
+            canonical.canonical_model_id.as_deref(),
+            Some("google/gemini-3.1-pro")
+        );
+        let opaque_state = canonical.opaque_state.unwrap();
+        assert_eq!(
+            opaque_state.kind,
+            OpaqueStateCapabilityKind::GeminiThoughtSignature
+        );
+        assert_eq!(opaque_state.family, "gemini");
+        assert_eq!(opaque_state.encoding_version, 1);
+        assert_eq!(
+            opaque_state.placeholder_strategy,
+            Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator)
+        );
+
         let low = antigravity_model_profile("gemini-3.1-pro-low");
         assert_eq!(
             low.canonical_model_id.as_deref(),
@@ -3318,6 +3337,17 @@ mod tests {
             Some("google/gemini-3.1-pro")
         );
         assert_eq!(alias.variant.unwrap().id, "pro-agent");
+        let opaque_state = alias.opaque_state.unwrap();
+        assert_eq!(
+            opaque_state.kind,
+            OpaqueStateCapabilityKind::GeminiThoughtSignature
+        );
+        assert_eq!(opaque_state.family, "gemini");
+        assert_eq!(opaque_state.encoding_version, 1);
+        assert_eq!(
+            opaque_state.placeholder_strategy,
+            Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator)
+        );
 
         assert!(antigravity_model_profile("something-pro-experimental")
             .canonical_model_id
@@ -3354,6 +3384,20 @@ mod tests {
         assert_eq!(models[0].id, "gemini-3-flash");
         assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3 Flash"));
         assert_eq!(models[0].context_window, Some(1048576));
+        let capabilities =
+            ModelCapabilitiesV2::from_json(models[0].capabilities_json.as_deref().unwrap())
+                .unwrap();
+        let opaque_state = capabilities.opaque_state.unwrap();
+        assert_eq!(
+            opaque_state.kind,
+            OpaqueStateCapabilityKind::GeminiThoughtSignature
+        );
+        assert_eq!(opaque_state.family, "gemini");
+        assert_eq!(opaque_state.encoding_version, 1);
+        assert_eq!(
+            opaque_state.placeholder_strategy,
+            Some(OpaqueStatePlaceholderStrategy::Gemini3SkipValidator)
+        );
 
         assert_eq!(models[1].id, "claude-sonnet-4-5");
         assert_eq!(models[1].display_name.as_deref(), Some("Claude Sonnet 4.5"));
